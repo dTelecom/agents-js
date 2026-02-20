@@ -80,20 +80,7 @@ export class VoiceAgent extends EventEmitter {
       log.info('Memory initialized');
     }
 
-    // 2. Connect to room + warm up LLM/TTS in parallel
-    //    Warmup is fire-and-forget — it should finish before the first
-    //    greeting but doesn't block room connection.
-    const warmupLLM = this.config.llm.warmup
-      ? this.config.llm.warmup(this.config.instructions).catch((err: unknown) => {
-          log.warn('LLM warmup failed:', err);
-        })
-      : Promise.resolve();
-    const warmupTTS = this.config.tts?.warmup
-      ? this.config.tts.warmup().catch((err: unknown) => {
-          log.warn('TTS warmup failed:', err);
-        })
-      : Promise.resolve();
-
+    // 2. Connect to room
     this.connection = new RoomConnection();
     await this.connection.connect({
       room: options.room,
@@ -109,12 +96,8 @@ export class VoiceAgent extends EventEmitter {
     if (this._dumpDir) this.audioOutput.dumpDir = this._dumpDir;
     this.audioOutput.startSilence();
 
-    // Wait for warmup to finish (should already be done by now)
-    await Promise.all([warmupLLM, warmupTTS]);
-
-    // 4. Create pipeline
+    // 4. Create pipeline (warmup is handled internally by Pipeline)
     this.pipeline = new Pipeline({
-      skipWarmup: true,
       stt: this.config.stt,
       llm: this.config.llm,
       tts: this.config.tts,

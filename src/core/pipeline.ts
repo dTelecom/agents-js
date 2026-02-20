@@ -95,19 +95,30 @@ export class Pipeline extends EventEmitter {
       this.setAgentState('idle');
     };
 
-    // Warm up LLM/TTS (skip if caller already warmed up)
-    if (!options.skipWarmup) {
-      if (this.llm.warmup) {
-        this.llm.warmup(options.instructions).catch((err: unknown) => {
+    // Warm up LLM/TTS in background (fire-and-forget)
+    this._warmupPromise = this.warmup(options.instructions);
+  }
+
+  /** One-shot warmup — safe to call from constructor, resolves when both LLM and TTS are ready. */
+  private _warmupPromise: Promise<void>;
+
+  private async warmup(instructions: string): Promise<void> {
+    const tasks: Promise<void>[] = [];
+    if (this.llm.warmup) {
+      tasks.push(
+        this.llm.warmup(instructions).catch((err: unknown) => {
           log.warn('LLM warmup failed:', err);
-        });
-      }
-      if (this.tts?.warmup) {
+        }),
+      );
+    }
+    if (this.tts?.warmup) {
+      tasks.push(
         this.tts.warmup().catch((err: unknown) => {
           log.warn('TTS warmup failed:', err);
-        });
-      }
+        }),
+      );
     }
+    await Promise.all(tasks);
   }
 
   get processing(): boolean {
@@ -248,6 +259,7 @@ export class Pipeline extends EventEmitter {
     }
 
     this._processing = true;
+    await this._warmupPromise;
 
     // ── Latency tracking ──
     const tSpeechEnd = this.lastFinalAt;
@@ -449,6 +461,7 @@ export class Pipeline extends EventEmitter {
     }
 
     this._processing = true;
+    await this._warmupPromise;
     log.info(`say(): "${text.slice(0, 60)}"`);
 
     try {
