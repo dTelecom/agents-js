@@ -5,11 +5,11 @@ import { createLogger } from '../utils/logger';
 
 const log = createLogger('AudioOutput');
 
-/** Rate at which we write audio (16kHz mono, 20ms frames = 320 samples) */
-const SAMPLE_RATE = 16000;
+/** Rate at which we write audio (48kHz mono, 20ms frames = 960 samples) */
+const SAMPLE_RATE = 48000;
 const CHANNELS = 1;
 const FRAME_DURATION_MS = 20;
-const SAMPLES_PER_FRAME = (SAMPLE_RATE * FRAME_DURATION_MS) / 1000; // 320 at 16kHz
+const SAMPLES_PER_FRAME = (SAMPLE_RATE * FRAME_DURATION_MS) / 1000; // 960 at 48kHz
 
 /** Pre-allocated silence frame */
 const SILENCE = new Int16Array(SAMPLES_PER_FRAME);

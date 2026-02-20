@@ -59,6 +59,9 @@ vi.mock('@dtelecom/server-sdk-node', () => ({
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+/** 48kHz, 20ms frame = 960 samples */
+const FRAME = 960;
+
 /** Create a PCM16 buffer of `numSamples` with optional fill value. */
 function makePCM(numSamples: number, fill = 1000): Buffer {
   const buf = Buffer.alloc(numSamples * 2);
@@ -92,38 +95,38 @@ describe('AudioOutput', () => {
   });
 
   describe('writeBuffer', () => {
-    it('splits buffer into 320-sample (20ms) frames', async () => {
-      const pcm = makePCM(640);
+    it('splits buffer into 960-sample (20ms @ 48kHz) frames', async () => {
+      const pcm = makePCM(FRAME * 2);
       await output.writeBuffer(pcm);
 
       expect(source.frames).toHaveLength(2);
-      expect(source.frames[0].samplesPerChannel).toBe(320);
-      expect(source.frames[1].samplesPerChannel).toBe(320);
+      expect(source.frames[0].samplesPerChannel).toBe(FRAME);
+      expect(source.frames[1].samplesPerChannel).toBe(FRAME);
     });
 
     it('sends partial last frame to AudioSource', async () => {
-      // 480 samples = 1 full frame (320) + 1 partial frame (160)
-      const pcm = makePCM(480, 5000);
+      // 1440 samples = 1 full frame (960) + 1 partial frame (480)
+      const pcm = makePCM(FRAME + 480, 5000);
       await output.writeBuffer(pcm);
 
       expect(source.frames).toHaveLength(2);
-      expect(source.frames[0].samplesPerChannel).toBe(320);
-      expect(source.frames[1].samplesPerChannel).toBe(160);
+      expect(source.frames[0].samplesPerChannel).toBe(FRAME);
+      expect(source.frames[1].samplesPerChannel).toBe(480);
       expect(source.frames[0].samples[0]).toBe(5000);
       expect(source.frames[1].samples[0]).toBe(5000);
-      expect(source.frames[1].samples[159]).toBe(5000);
+      expect(source.frames[1].samples[479]).toBe(5000);
     });
 
     it('sets playing=false after write', async () => {
       expect(output.playing).toBe(false);
-      await output.writeBuffer(makePCM(320));
+      await output.writeBuffer(makePCM(FRAME));
       expect(output.playing).toBe(false);
     });
 
     it('handles buffer with odd byteOffset (alignment fix)', async () => {
-      const backing = Buffer.alloc(641);
-      const oddOffset = Buffer.from(backing.buffer, 1, 640);
-      for (let i = 0; i < 640; i++) oddOffset[i] = i % 256;
+      const backing = Buffer.alloc(FRAME * 2 + 1);
+      const oddOffset = Buffer.from(backing.buffer, 1, FRAME * 2);
+      for (let i = 0; i < FRAME * 2; i++) oddOffset[i] = i % 256;
 
       await output.writeBuffer(oddOffset);
       expect(source.frames.length).toBeGreaterThan(0);
@@ -132,10 +135,10 @@ describe('AudioOutput', () => {
 
   describe('writeStream', () => {
     it('writes multiple chunks sequentially', async () => {
-      const chunks = [makePCM(320), makePCM(320), makePCM(320)];
+      const chunks = [makePCM(FRAME), makePCM(FRAME), makePCM(FRAME)];
       await output.writeStream(makeStream(chunks));
 
-      // 3 chunks × 320 samples = 3 full frames
+      // 3 chunks of exactly 1 frame each
       expect(source.frames).toHaveLength(3);
     });
 
@@ -146,7 +149,7 @@ describe('AudioOutput', () => {
       async function* slowStream(): AsyncGenerator<Buffer> {
         for (let i = 0; i < 10; i++) {
           yieldCount++;
-          yield makePCM(320);
+          yield makePCM(FRAME);
           if (i === 1) controller.abort();
         }
       }
@@ -157,57 +160,53 @@ describe('AudioOutput', () => {
     });
 
     it('sets playing=false after stream ends', async () => {
-      await output.writeStream(makeStream([makePCM(320)]));
+      await output.writeStream(makeStream([makePCM(FRAME)]));
       expect(output.playing).toBe(false);
     });
   });
 
   describe('partial frames', () => {
     it('sends partial last frame directly to AudioSource', async () => {
-      // 500 samples = 1 full frame (320) + 1 partial frame (180)
-      // Partial frame goes to AudioSource directly — it handles accumulation
-      const chunks = [makePCM(500, 7777)];
+      // 1500 samples = 1 full frame (960) + 1 partial frame (540)
+      const chunks = [makePCM(FRAME + 540, 7777)];
       await output.writeStream(makeStream(chunks));
 
       expect(source.frames).toHaveLength(2);
-      expect(source.frames[0].samplesPerChannel).toBe(320);
-      expect(source.frames[1].samplesPerChannel).toBe(180);
+      expect(source.frames[0].samplesPerChannel).toBe(FRAME);
+      expect(source.frames[1].samplesPerChannel).toBe(540);
       expect(source.frames[1].samples[0]).toBe(7777);
     });
 
     it('each chunk is split independently', async () => {
-      // Chunk 1: 200 samples → 1 partial frame (200)
-      // Chunk 2: 200 samples → 1 partial frame (200)
-      // Chunk 3: 240 samples → 1 partial frame (240)
-      // AudioSource accumulates partials in its internal buffer
-      const chunks = [makePCM(200), makePCM(200), makePCM(240)];
+      // 3 sub-frame chunks — all partial, no full frames
+      const chunks = [makePCM(600), makePCM(600), makePCM(700)];
       await output.writeStream(makeStream(chunks));
 
       expect(source.frames).toHaveLength(3);
-      expect(source.frames[0].samplesPerChannel).toBe(200);
-      expect(source.frames[1].samplesPerChannel).toBe(200);
-      expect(source.frames[2].samplesPerChannel).toBe(240);
+      expect(source.frames[0].samplesPerChannel).toBe(600);
+      expect(source.frames[1].samplesPerChannel).toBe(600);
+      expect(source.frames[2].samplesPerChannel).toBe(700);
     });
 
     it('aligned chunks produce only full frames', async () => {
-      // 3 chunks of exactly 640 samples = 2 frames each = 6 frames total
-      const chunks = [makePCM(640), makePCM(640), makePCM(640)];
+      // 3 chunks of exactly 2 frames each = 6 frames total
+      const chunks = [makePCM(FRAME * 2), makePCM(FRAME * 2), makePCM(FRAME * 2)];
       await output.writeStream(makeStream(chunks));
 
       expect(source.frames).toHaveLength(6);
       for (const frame of source.frames) {
-        expect(frame.samplesPerChannel).toBe(320);
+        expect(frame.samplesPerChannel).toBe(FRAME);
       }
     });
 
     it('small chunks sent as single partial frames', async () => {
-      const chunks = [makePCM(100), makePCM(100), makePCM(200)];
+      const chunks = [makePCM(300), makePCM(300), makePCM(600)];
       await output.writeStream(makeStream(chunks));
 
       expect(source.frames).toHaveLength(3);
-      expect(source.frames[0].samplesPerChannel).toBe(100);
-      expect(source.frames[1].samplesPerChannel).toBe(100);
-      expect(source.frames[2].samplesPerChannel).toBe(200);
+      expect(source.frames[0].samplesPerChannel).toBe(300);
+      expect(source.frames[1].samplesPerChannel).toBe(300);
+      expect(source.frames[2].samplesPerChannel).toBe(600);
     });
   });
 
@@ -215,7 +214,7 @@ describe('AudioOutput', () => {
     it('sleeps ~20ms between frames', async () => {
       vi.useRealTimers();
 
-      const pcm = makePCM(960); // 3 full frames
+      const pcm = makePCM(FRAME * 3); // 3 full frames
       const start = performance.now();
       await output.writeBuffer(pcm);
       const elapsed = performance.now() - start;
@@ -228,7 +227,7 @@ describe('AudioOutput', () => {
     it('does not burst frames — gap between consecutive frames', async () => {
       vi.useRealTimers();
 
-      const pcm = makePCM(960); // 3 frames
+      const pcm = makePCM(FRAME * 3); // 3 frames
       await output.writeBuffer(pcm);
 
       for (let i = 1; i < source.frames.length; i++) {
@@ -243,7 +242,7 @@ describe('AudioOutput', () => {
 
       async function* delayedStream(): AsyncGenerator<Buffer> {
         await new Promise((r) => setTimeout(r, 200)); // TTS latency
-        yield makePCM(960); // 3 frames arrive at once
+        yield makePCM(FRAME * 3); // 3 frames arrive at once
       }
 
       await output.writeStream(delayedStream());
@@ -261,7 +260,7 @@ describe('AudioOutput', () => {
       vi.useRealTimers();
 
       // 3 chunks of 2 frames each = 6 paced frames
-      const chunks = [makePCM(640), makePCM(640), makePCM(640)];
+      const chunks = [makePCM(FRAME * 2), makePCM(FRAME * 2), makePCM(FRAME * 2)];
       await output.writeStream(makeStream(chunks));
 
       expect(source.frames).toHaveLength(6);
@@ -279,10 +278,10 @@ describe('AudioOutput', () => {
     it('partial frames skip sleep — only full frames are paced', async () => {
       vi.useRealTimers();
 
-      // 500 samples per chunk = 1 full frame (320) + 1 partial (180)
+      // 1500 samples per chunk = 1 full frame (960) + 1 partial (540)
       // Only full frames sleep 20ms, partial frames are sent immediately
       // 3 chunks × 1 full frame = 3 sleeps = ~60ms (not 120ms)
-      const chunks = [makePCM(500), makePCM(500), makePCM(500)];
+      const chunks = [makePCM(FRAME + 540), makePCM(FRAME + 540), makePCM(FRAME + 540)];
       const start = performance.now();
       await output.writeStream(makeStream(chunks));
       const elapsed = performance.now() - start;
@@ -346,19 +345,19 @@ describe('AudioOutput', () => {
 
   describe('data integrity', () => {
     it('preserves sample values through writeBuffer', async () => {
-      const pcm = makePCM(320, 12345);
+      const pcm = makePCM(FRAME, 12345);
       await output.writeBuffer(pcm);
 
       expect(source.frames).toHaveLength(1);
       expect(source.frames[0].samples[0]).toBe(12345);
-      expect(source.frames[0].samples[319]).toBe(12345);
+      expect(source.frames[0].samples[FRAME - 1]).toBe(12345);
     });
 
     it('preserves sample values across multiple frames', async () => {
-      const buf = Buffer.alloc(1280);
-      const view = new Int16Array(buf.buffer, buf.byteOffset, 640);
-      view.fill(1111, 0, 320);
-      view.fill(2222, 320, 640);
+      const buf = Buffer.alloc(FRAME * 2 * 2); // 2 frames × 2 bytes per sample
+      const view = new Int16Array(buf.buffer, buf.byteOffset, FRAME * 2);
+      view.fill(1111, 0, FRAME);
+      view.fill(2222, FRAME, FRAME * 2);
 
       await output.writeBuffer(buf);
 
@@ -368,10 +367,10 @@ describe('AudioOutput', () => {
     });
 
     it('all frames use correct sample rate and channels', async () => {
-      await output.writeBuffer(makePCM(960));
+      await output.writeBuffer(makePCM(FRAME * 3));
 
       for (const frame of source.frames) {
-        expect(frame.sampleRate).toBe(16000);
+        expect(frame.sampleRate).toBe(48000);
         expect(frame.channels).toBe(1);
       }
     });
