@@ -62,12 +62,8 @@ export type {
   DataMessageHandler,
 } from './core/types';
 
-// Memory (optional — requires better-sqlite3, sqlite-vec, @huggingface/transformers)
-export { Embedder } from './memory/embedder';
-export { MemoryStore } from './memory/memory-store';
-export type { TurnRow, SessionRow, SearchResult, SessionSearchResult } from './memory/memory-store';
-export { RoomMemory } from './memory/room-memory';
-export type { RoomMemoryConfig } from './memory/room-memory';
+// Memory is a separate entry point: import from '@dtelecom/agents-js/memory'
+// Requires optional peer deps: better-sqlite3, sqlite-vec, @huggingface/transformers
 
 // Utils
 export { createLogger, setLogLevel, getLogLevel } from './utils/logger';
