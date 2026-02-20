@@ -1,0 +1,89 @@
+{
+  "name": "@dtelecom/agents-js",
+  "version": "0.1.0",
+  "description": "AI voice agent framework for dTelecom rooms",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./providers": {
+      "types": "./dist/providers/index.d.ts",
+      "import": "./dist/providers/index.mjs",
+      "require": "./dist/providers/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "build:watch": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@dtelecom/server-sdk-js": ">=3.0.0",
+    "@dtelecom/server-sdk-node": ">=0.2.4",
+    "@huggingface/transformers": ">=3.0.0",
+    "better-sqlite3": ">=11.0.0",
+    "sqlite-vec": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@dtelecom/server-sdk-js": {
+      "optional": false
+    },
+    "@dtelecom/server-sdk-node": {
+      "optional": false
+    },
+    "@huggingface/transformers": {
+      "optional": true
+    },
+    "better-sqlite3": {
+      "optional": true
+    },
+    "sqlite-vec": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@dtelecom/server-sdk-js": "^3.0.0",
+    "@dtelecom/server-sdk-node": "^0.2.3",
+    "@huggingface/transformers": "^3.8.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/ws": "^8.5.13",
+    "better-sqlite3": "^12.6.2",
+    "dotenv": "^17.3.1",
+    "sqlite-vec": "^0.1.7-alpha.2",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dTelecom/agents-js"
+  },
+  "keywords": [
+    "dtelecom",
+    "voice-agent",
+    "ai",
+    "stt",
+    "tts",
+    "llm",
+    "webrtc"
+  ]
+}

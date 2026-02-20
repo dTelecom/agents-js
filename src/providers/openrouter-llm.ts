@@ -1,0 +1,176 @@
+/**
+ * OpenRouterLLM — streaming LLM via OpenRouter (OpenAI-compatible API).
+ *
+ * Uses native fetch() with SSE parsing for streaming responses.
+ * No SDK dependency — just HTTP.
+ */
+
+import type { LLMPlugin, LLMChunk, Message } from '../core/types';
+import { createLogger } from '../utils/logger';
+
+const log = createLogger('OpenRouterLLM');
+
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+
+export interface OpenRouterLLMOptions {
+  apiKey: string;
+  /** Model identifier (e.g. 'openai/gpt-4o', 'anthropic/claude-sonnet-4') */
+  model: string;
+  /** Max tokens in response (default: 512) */
+  maxTokens?: number;
+  /** Sampling temperature 0-2 (default: 0.7) */
+  temperature?: number;
+  /** OpenRouter provider routing preferences */
+  providerRouting?: {
+    /** Sort providers by metric (e.g. 'latency') */
+    sort?: string;
+    /** Pin to specific providers in order */
+    order?: string[];
+    /** Allow fallback to other providers if pinned ones fail */
+    allowFallbacks?: boolean;
+  };
+}
+
+export class OpenRouterLLM implements LLMPlugin {
+  private readonly apiKey: string;
+  private readonly model: string;
+  private readonly maxTokens: number;
+  private readonly temperature: number;
+  private readonly provider?: { sort?: string; order?: string[]; allow_fallbacks?: boolean };
+
+  constructor(options: OpenRouterLLMOptions) {
+    if (!options.apiKey) {
+      throw new Error('OpenRouterLLM requires an apiKey');
+    }
+    this.apiKey = options.apiKey;
+    this.model = options.model;
+    this.maxTokens = options.maxTokens ?? 512;
+    this.temperature = options.temperature ?? 0.7;
+
+    if (options.providerRouting) {
+      this.provider = {
+        sort: options.providerRouting.sort,
+        order: options.providerRouting.order,
+        allow_fallbacks: options.providerRouting.allowFallbacks,
+      };
+    }
+  }
+
+  /**
+   * Warm up the LLM by sending the system prompt and a short message.
+   * Primes the HTTP/TLS connection and model loading on the provider side.
+   */
+  async warmup(systemPrompt: string): Promise<void> {
+    log.info('Warming up LLM connection...');
+    const start = performance.now();
+
+    const messages: Message[] = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: 'Hello' },
+    ];
+
+    try {
+      const gen = this.chat(messages);
+      for await (const chunk of gen) {
+        if (chunk.type === 'done') break;
+      }
+      log.info(`LLM warmup complete in ${(performance.now() - start).toFixed(0)}ms`);
+    } catch (err) {
+      log.warn('LLM warmup failed (non-fatal):', err);
+    }
+  }
+
+  async *chat(messages: Message[], signal?: AbortSignal): AsyncGenerator<LLMChunk> {
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages,
+      max_tokens: this.maxTokens,
+      temperature: this.temperature,
+      stream: true,
+    };
+    if (this.provider) {
+      body.provider = this.provider;
+    }
+
+    log.debug(`LLM request: model=${this.model}, messages=${messages.length}`);
+
+    const response = await fetch(OPENROUTER_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenRouter API error ${response.status}: ${errorText}`);
+    }
+
+    if (!response.body) {
+      throw new Error('OpenRouter response has no body');
+    }
+
+    // Parse SSE stream
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        // Check abort before blocking on read — prevents hanging when signal
+        // was fired while we were yielding tokens to the pipeline
+        if (signal?.aborted) break;
+
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+          const data = trimmed.slice(6);
+          if (data === '[DONE]') {
+            yield { type: 'done' };
+            return;
+          }
+
+          try {
+            const parsed = JSON.parse(data);
+            const choice = parsed.choices?.[0];
+            if (!choice) continue;
+
+            const delta = choice.delta;
+            if (delta?.content) {
+              yield { type: 'token', token: delta.content };
+            }
+
+            // Usage stats in the final chunk
+            if (parsed.usage) {
+              yield {
+                type: 'done',
+                usage: {
+                  promptTokens: parsed.usage.prompt_tokens,
+                  completionTokens: parsed.usage.completion_tokens,
+                },
+              };
+              return;
+            }
+          } catch {
+            // Skip malformed JSON chunks
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    yield { type: 'done' };
+  }
+}
