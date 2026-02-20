@@ -128,6 +128,26 @@ export function parseLangSegments(text: string, defaultLang: string): LangSegmen
   return segments;
 }
 
+/**
+ * Character patterns that indicate a specific language.
+ * Used as fallback detection for untagged text in multi-language mode.
+ */
+const LANG_DETECT_PATTERNS: Record<string, RegExp> = {
+  // Spanish: inverted punctuation, ñ, accented vowels
+  es: /[¡¿ñáéíóúüÁÉÍÓÚÜÑ]/,
+  // Japanese: hiragana, katakana, CJK ideographs, fullwidth forms
+  ja: /[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff\uff00-\uffef]/,
+  // Korean: Hangul
+  ko: /[\uac00-\ud7af\u1100-\u11ff]/,
+  // Chinese: CJK ideographs (overlaps with ja, but useful when ja not configured)
+  zh: /[\u4e00-\u9fff\u3400-\u4dbf]/,
+};
+
+/** Split text into sentences on sentence-ending punctuation. */
+function splitSentences(text: string): string[] {
+  return text.split(/(?<=[.!?¡¿。！？])\s+/).filter((s) => s.trim());
+}
+
 export class DeepgramTTS implements TTSPlugin {
   private readonly apiKey: string;
   private readonly models: Record<string, string>;
@@ -192,9 +212,14 @@ export class DeepgramTTS implements TTSPlugin {
   async *synthesize(text: string, signal?: AbortSignal): AsyncGenerator<Buffer> {
     if (signal?.aborted) return;
 
-    const segments = this.multiLanguage
+    let segments = this.multiLanguage
       ? parseLangSegments(text, this.defaultLang)
       : [{ lang: this.defaultLang, text }];
+
+    // Auto-detect language for untagged default-language segments
+    if (this.multiLanguage) {
+      segments = this.autoDetectSegments(segments);
+    }
 
     for (const segment of segments) {
       if (signal?.aborted) break;
@@ -203,6 +228,62 @@ export class DeepgramTTS implements TTSPlugin {
       const lang = this.models[segment.lang] ? segment.lang : this.defaultLang;
       yield* this.synthesizeSegment(lang, segment.text, signal);
     }
+  }
+
+  /**
+   * Split untagged default-language segments into sentences and detect
+   * the language of each sentence using character markers.
+   * Merges consecutive same-language sentences back together.
+   */
+  private autoDetectSegments(segments: LangSegment[]): LangSegment[] {
+    const result: LangSegment[] = [];
+
+    for (const seg of segments) {
+      // Only process untagged (default language) segments
+      if (seg.lang !== this.defaultLang) {
+        result.push(seg);
+        continue;
+      }
+
+      // Split into sentences and detect language per sentence
+      const sentences = splitSentences(seg.text);
+      if (sentences.length <= 1) {
+        const detected = this.detectLang(seg.text);
+        if (detected !== this.defaultLang) {
+          log.debug(`Auto-detected [${detected}] for: "${seg.text.slice(0, 40)}"`);
+        }
+        result.push({ lang: detected, text: seg.text });
+        continue;
+      }
+
+      // Detect per sentence and merge consecutive same-language runs
+      let current: LangSegment | null = null;
+      for (const sentence of sentences) {
+        const lang = this.detectLang(sentence);
+        if (lang !== this.defaultLang) {
+          log.debug(`Auto-detected [${lang}] for: "${sentence.slice(0, 40)}"`);
+        }
+        if (current && current.lang === lang) {
+          current.text += ' ' + sentence;
+        } else {
+          if (current) result.push(current);
+          current = { lang, text: sentence };
+        }
+      }
+      if (current) result.push(current);
+    }
+
+    return result;
+  }
+
+  /** Detect language of text using character markers. Returns default if no markers found. */
+  private detectLang(text: string): string {
+    for (const lang of Object.keys(this.models)) {
+      if (lang === this.defaultLang) continue;
+      const pattern = LANG_DETECT_PATTERNS[lang];
+      if (pattern && pattern.test(text)) return lang;
+    }
+    return this.defaultLang;
   }
 
   private async *synthesizeSegment(
