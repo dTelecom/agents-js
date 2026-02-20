@@ -50,6 +50,8 @@ export interface TTSPlugin {
   synthesize(text: string, signal?: AbortSignal): AsyncGenerator<Buffer>;
   /** Optional: pre-connect to TTS server */
   warmup?(): Promise<void>;
+  /** Strip provider-specific markup from text for display/events. */
+  cleanText?(text: string): string;
 }
 
 // ─── Memory Config ───────────────────────────────────────────────────────────

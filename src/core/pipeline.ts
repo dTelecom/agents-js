@@ -58,6 +58,11 @@ export class Pipeline extends EventEmitter {
   private readonly beforeRespond?: (speaker: string, text: string) => boolean | Promise<boolean>;
   private readonly memory?: RoomMemory;
 
+  /** Strip provider-specific markup (e.g. SSML lang tags) for display. */
+  private cleanText(text: string): string {
+    return this.tts?.cleanText ? this.tts.cleanText(text) : text;
+  }
+
   /** Active STT streams, keyed by participant identity */
   private sttStreams = new Map<string, STTStream>();
 
@@ -378,7 +383,7 @@ export class Pipeline extends EventEmitter {
                   tFirstAudioPlayed = t;
                   this.setAgentState('speaking');
                 }
-                this.emit('sentence', sentence);
+                this.emit('sentence', this.cleanText(sentence));
               });
               continue;
             }
@@ -422,7 +427,7 @@ export class Pipeline extends EventEmitter {
       if (fullResponse.trim()) {
         this.context.addAgentTurn(fullResponse.trim());
         this.memory?.storeTurn('assistant', fullResponse.trim(), true);
-        this.emit('response', fullResponse.trim());
+        this.emit('response', this.cleanText(fullResponse.trim()));
       }
 
       // Wait for audio pipeline to drain before signaling "listening"
@@ -471,14 +476,14 @@ export class Pipeline extends EventEmitter {
 
       await this.synthesizeAndPlay(text, signal, () => {
         this.setAgentState('speaking');
-        this.emit('sentence', text);
+        this.emit('sentence', this.cleanText(text));
       });
 
       if (!signal.aborted) {
         await this.audioOutput.writeSilence(40);
         this.context.addAgentTurn(text);
         this.memory?.storeTurn('assistant', text, true);
-        this.emit('response', text);
+        this.emit('response', this.cleanText(text));
       }
 
       // Wait for audio pipeline to drain before signaling "listening"
