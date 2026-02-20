@@ -57,6 +57,11 @@ export class AudioOutput {
 
     log.debug('Starting silence keepalive (sparse, 3s interval)');
 
+    // Send one silence frame immediately so the SFU starts forwarding the
+    // track right away — clients get TrackSubscribed without waiting 3s.
+    const immediate = new AudioFrame(SILENCE, SAMPLE_RATE, CHANNELS, SAMPLES_PER_FRAME);
+    this.source.captureFrame(immediate).catch(() => {});
+
     this.silenceInterval = setInterval(() => {
       if (!this._playing && !this._responding && !this._stopped) {
         const f = new AudioFrame(SILENCE, SAMPLE_RATE, CHANNELS, SAMPLES_PER_FRAME);

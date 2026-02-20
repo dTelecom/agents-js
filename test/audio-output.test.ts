@@ -306,10 +306,13 @@ describe('AudioOutput', () => {
 
     it('suppresses silence during responding (_responding=true)', async () => {
       output.startSilence();
+      // 1 immediate silence frame sent by startSilence()
+      const initialFrames = source.frames.length;
       output.beginResponse();
 
       await vi.advanceTimersByTimeAsync(10000);
-      expect(source.frames).toHaveLength(0);
+      // No additional frames while responding
+      expect(source.frames).toHaveLength(initialFrames);
 
       output.endResponse();
       await vi.advanceTimersByTimeAsync(4000);

@@ -121,6 +121,8 @@ export interface PipelineOptions {
   beforeRespond?: (speaker: string, text: string) => boolean | Promise<boolean>;
   /** Room memory instance (injected by VoiceAgent if memory is enabled) */
   memory?: import('../memory/room-memory').RoomMemory;
+  /** Skip LLM/TTS warmup (already done by caller) */
+  skipWarmup?: boolean;
 }
 
 // ─── Events ──────────────────────────────────────────────────────────────────

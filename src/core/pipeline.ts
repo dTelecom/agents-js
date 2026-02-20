@@ -95,18 +95,18 @@ export class Pipeline extends EventEmitter {
       this.setAgentState('idle');
     };
 
-    // Warm up LLM
-    if (this.llm.warmup) {
-      this.llm.warmup(options.instructions).catch((err: unknown) => {
-        log.warn('LLM warmup failed:', err);
-      });
-    }
-
-    // Warm up TTS
-    if (this.tts?.warmup) {
-      this.tts.warmup().catch((err: unknown) => {
-        log.warn('TTS warmup failed:', err);
-      });
+    // Warm up LLM/TTS (skip if caller already warmed up)
+    if (!options.skipWarmup) {
+      if (this.llm.warmup) {
+        this.llm.warmup(options.instructions).catch((err: unknown) => {
+          log.warn('LLM warmup failed:', err);
+        });
+      }
+      if (this.tts?.warmup) {
+        this.tts.warmup().catch((err: unknown) => {
+          log.warn('TTS warmup failed:', err);
+        });
+      }
     }
   }
 
