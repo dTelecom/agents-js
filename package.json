@@ -1,6 +1,6 @@
 {
   "name": "@dtelecom/agents-js",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "AI voice agent framework for dTelecom rooms",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -36,7 +36,7 @@
   },
   "peerDependencies": {
     "@dtelecom/server-sdk-js": ">=3.0.0",
-    "@dtelecom/server-sdk-node": ">=0.2.4",
+    "@dtelecom/server-sdk-node": ">=0.2.5",
     "@huggingface/transformers": ">=3.0.0",
     "better-sqlite3": ">=11.0.0",
     "sqlite-vec": ">=0.1.0"
@@ -63,7 +63,7 @@
   },
   "devDependencies": {
     "@dtelecom/server-sdk-js": "^3.0.0",
-    "@dtelecom/server-sdk-node": "^0.2.3",
+    "@dtelecom/server-sdk-node": "^0.2.5",
     "@huggingface/transformers": "^3.8.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/ws": "^8.5.13",

@@ -51,23 +51,40 @@ export class AudioOutput {
    * Start sparse silence keepalive to prevent the SFU from dropping the track.
    * With Opus DTX enabled, the encoder handles silence natively — we only need
    * an occasional packet to keep the SSRC alive.
+   *
+   * Waits for the RTP transport to be ready before sending — no frames are
+   * wasted before DTLS is connected.
    */
   startSilence(): void {
     if (this.silenceInterval) return;
 
-    log.debug('Starting silence keepalive (sparse, 3s interval)');
+    const startKeepalive = () => {
+      log.debug('Transport ready — sending initial silence + starting 3s keepalive');
 
-    // Send one silence frame immediately so the SFU starts forwarding the
-    // track right away — clients get TrackSubscribed without waiting 3s.
-    const immediate = new AudioFrame(SILENCE, SAMPLE_RATE, CHANNELS, SAMPLES_PER_FRAME);
-    this.source.captureFrame(immediate).catch(() => {});
+      // Send one silence frame immediately so the SFU starts forwarding the
+      // track right away — clients get TrackSubscribed without delay.
+      this.sendSilenceFrame();
 
-    this.silenceInterval = setInterval(() => {
-      if (!this._playing && !this._responding && !this._stopped) {
-        const f = new AudioFrame(SILENCE, SAMPLE_RATE, CHANNELS, SAMPLES_PER_FRAME);
-        this.source.captureFrame(f).catch(() => {});
-      }
-    }, 3000);
+      this.silenceInterval = setInterval(() => {
+        if (!this._playing && !this._responding && !this._stopped) {
+          this.sendSilenceFrame();
+        }
+      }, 3000);
+    };
+
+    if (this.source.ready) {
+      startKeepalive();
+    } else {
+      log.debug('Waiting for transport before starting silence keepalive...');
+      this.source.onReady = () => startKeepalive();
+    }
+  }
+
+  private sendSilenceFrame(): void {
+    const frame = new AudioFrame(SILENCE, SAMPLE_RATE, CHANNELS, SAMPLES_PER_FRAME);
+    this.source.captureFrame(frame).catch((err) => {
+      log.warn('Failed to send silence frame:', err);
+    });
   }
 
   /**

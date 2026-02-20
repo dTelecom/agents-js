@@ -24,6 +24,27 @@ interface CapturedFrame {
 class MockAudioSource {
   readonly frames: CapturedFrame[] = [];
   private _flushed = 0;
+  private _onReady: (() => void) | null = null;
+
+  /** Simulates transport readiness (DTLS connected). Defaults to true for most tests. */
+  ready = true;
+
+  set onReady(cb: (() => void) | null) {
+    if (cb && this.ready) {
+      cb();
+      return;
+    }
+    this._onReady = cb;
+  }
+
+  /** Simulate transport becoming ready (call from tests). */
+  makeReady(): void {
+    this.ready = true;
+    if (this._onReady) {
+      this._onReady();
+      this._onReady = null;
+    }
+  }
 
   get flushCount(): number {
     return this._flushed;
@@ -317,6 +338,23 @@ describe('AudioOutput', () => {
       output.endResponse();
       await vi.advanceTimersByTimeAsync(4000);
       expect(source.frames.length).toBeGreaterThan(0);
+    });
+
+    it('defers silence until transport is ready', async () => {
+      source.ready = false;
+      output.startSilence();
+
+      // No frames sent while transport is not ready
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(source.frames).toHaveLength(0);
+
+      // Transport becomes ready — immediate frame + keepalive starts
+      source.makeReady();
+      expect(source.frames).toHaveLength(1);
+      expect(source.frames[0].samples.every((s) => s === 0)).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(source.frames.length).toBeGreaterThan(1);
     });
 
     it('does not double-start silence interval', () => {
