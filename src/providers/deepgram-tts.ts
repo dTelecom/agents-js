@@ -156,7 +156,7 @@ export class DeepgramTTS implements TTSPlugin {
     this.apiKey = options.apiKey;
     this.sampleRate = options.sampleRate ?? DEFAULT_SAMPLE_RATE;
     this.openRouterApiKey = options.openRouterApiKey;
-    this.tagModel = options.tagModel ?? 'openai/gpt-4o-mini';
+    this.tagModel = options.tagModel ?? 'google/gemini-2.5-flash-lite';
 
     if (typeof options.model === 'string') {
       // Single-language mode
@@ -177,10 +177,8 @@ export class DeepgramTTS implements TTSPlugin {
 
     // Build system prompt for language tagging from configured languages
     const nonDefaultLangs = Object.keys(this.models).filter((l) => l !== this.defaultLang);
-    this.tagSystemPrompt = `You add SSML language tags to mixed-language text.
-Available languages: ${this.defaultLang} (default), ${nonDefaultLangs.join(', ')}.
-Wrap every non-${this.defaultLang} word/phrase in <lang xml:lang="CODE">...</lang>.
-${this.defaultLang.charAt(0).toUpperCase() + this.defaultLang.slice(1)} text gets no tag. Return ONLY the tagged text, nothing else.`;
+    this.tagSystemPrompt = `Tag non-${this.defaultLang} words with <lang xml:lang="CODE">...</lang>. Languages: ${nonDefaultLangs.join(', ')}.
+RULES: Do NOT translate, add, remove, or change any words. Only add tags around existing non-${this.defaultLang} words. Output the tagged text only.`;
   }
 
   /** Pre-connect all language connections + warm up tagging LLM in parallel. */
@@ -216,6 +214,7 @@ ${this.defaultLang.charAt(0).toUpperCase() + this.defaultLang.slice(1)} text get
             { role: 'user', content: 'Hello' },
           ],
           max_tokens: 10,
+          provider: { sort: 'latency' },
         }),
       });
       log.info(`Tagging LLM warmup complete in ${(performance.now() - start).toFixed(0)}ms`);
@@ -252,7 +251,8 @@ ${this.defaultLang.charAt(0).toUpperCase() + this.defaultLang.slice(1)} text get
             { role: 'system', content: this.tagSystemPrompt },
             { role: 'user', content: text },
           ],
-          max_tokens: Math.max(256, text.length * 2),
+          max_tokens: Math.max(256, Math.ceil(text.length * 3)),
+          provider: { sort: 'latency' },
         }),
         signal,
       });
