@@ -378,12 +378,17 @@ export class Pipeline extends EventEmitter {
                 log.debug(`Skipping non-word sentence: "${sentence}"`);
                 continue;
               }
-              await this.synthesizeAndPlay(sentence, signal, (t) => {
+              // Preprocess (e.g. add language tags) before synthesis
+              let processed = sentence;
+              if (this.tts?.preprocessText) {
+                processed = await this.tts.preprocessText(sentence, signal);
+              }
+              await this.synthesizeAndPlay(processed, signal, (t) => {
                 if (!tFirstAudioPlayed) {
                   tFirstAudioPlayed = t;
                   this.setAgentState('speaking');
                 }
-                this.emit('sentence', this.cleanText(sentence));
+                this.emit('sentence', this.cleanText(processed));
               });
               continue;
             }
@@ -474,16 +479,22 @@ export class Pipeline extends EventEmitter {
       this.audioOutput.beginResponse();
       this.setAgentState('thinking');
 
-      await this.synthesizeAndPlay(text, signal, () => {
+      // Preprocess (e.g. add language tags) before synthesis
+      let processed = text;
+      if (this.tts?.preprocessText) {
+        processed = await this.tts.preprocessText(text, signal);
+      }
+
+      await this.synthesizeAndPlay(processed, signal, () => {
         this.setAgentState('speaking');
-        this.emit('sentence', this.cleanText(text));
+        this.emit('sentence', this.cleanText(processed));
       });
 
       if (!signal.aborted) {
         await this.audioOutput.writeSilence(40);
         this.context.addAgentTurn(text);
         this.memory?.storeTurn('assistant', text, true);
-        this.emit('response', this.cleanText(text));
+        this.emit('response', this.cleanText(processed));
       }
 
       // Wait for audio pipeline to drain before signaling "listening"

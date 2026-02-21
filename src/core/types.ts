@@ -52,6 +52,8 @@ export interface TTSPlugin {
   warmup?(): Promise<void>;
   /** Strip provider-specific markup from text for display/events. */
   cleanText?(text: string): string;
+  /** Transform text before synthesis (e.g., add language tags). Called by Pipeline per sentence. */
+  preprocessText?(text: string, signal?: AbortSignal): Promise<string>;
 }
 
 // ─── Memory Config ───────────────────────────────────────────────────────────

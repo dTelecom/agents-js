@@ -29,6 +29,10 @@ export interface DeepgramTTSOptions {
   defaultLanguage?: string;
   /** Sample rate (default: 48000 — matches pipeline) */
   sampleRate?: number;
+  /** OpenRouter API key for LLM-based language tagging (multi-language only) */
+  openRouterApiKey?: string;
+  /** Fast model for tagging (default: 'openai/gpt-4o-mini') */
+  tagModel?: string;
 }
 
 interface LangSegment {
@@ -128,32 +132,15 @@ export function parseLangSegments(text: string, defaultLang: string): LangSegmen
   return segments;
 }
 
-/**
- * Character patterns that indicate a specific language.
- * Used as fallback detection for untagged text in multi-language mode.
- */
-const LANG_DETECT_PATTERNS: Record<string, RegExp> = {
-  // Spanish: inverted punctuation, ñ, accented vowels
-  es: /[¡¿ñáéíóúüÁÉÍÓÚÜÑ]/,
-  // Japanese: hiragana, katakana, CJK ideographs, fullwidth forms
-  ja: /[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff\uff00-\uffef]/,
-  // Korean: Hangul
-  ko: /[\uac00-\ud7af\u1100-\u11ff]/,
-  // Chinese: CJK ideographs (overlaps with ja, but useful when ja not configured)
-  zh: /[\u4e00-\u9fff\u3400-\u4dbf]/,
-};
-
-/** Split text into sentences on sentence-ending punctuation. */
-function splitSentences(text: string): string[] {
-  return text.split(/(?<=[.!?¡¿。！？])\s+/).filter((s) => s.trim());
-}
-
 export class DeepgramTTS implements TTSPlugin {
   private readonly apiKey: string;
   private readonly models: Record<string, string>;
   private readonly defaultLang: string;
   private readonly sampleRate: number;
   private readonly multiLanguage: boolean;
+  private readonly openRouterApiKey?: string;
+  private readonly tagModel: string;
+  private readonly tagSystemPrompt: string;
 
   /** Connection pool: one WebSocket per language code */
   private connections = new Map<string, WebSocket>();
@@ -168,6 +155,8 @@ export class DeepgramTTS implements TTSPlugin {
 
     this.apiKey = options.apiKey;
     this.sampleRate = options.sampleRate ?? DEFAULT_SAMPLE_RATE;
+    this.openRouterApiKey = options.openRouterApiKey;
+    this.tagModel = options.tagModel ?? 'openai/gpt-4o-mini';
 
     if (typeof options.model === 'string') {
       // Single-language mode
@@ -185,18 +174,53 @@ export class DeepgramTTS implements TTSPlugin {
       }
       this.defaultLang = options.defaultLanguage ?? keys[0];
     }
+
+    // Build system prompt for language tagging from configured languages
+    const nonDefaultLangs = Object.keys(this.models).filter((l) => l !== this.defaultLang);
+    this.tagSystemPrompt = `You add SSML language tags to mixed-language text.
+Available languages: ${this.defaultLang} (default), ${nonDefaultLangs.join(', ')}.
+Wrap every non-${this.defaultLang} word/phrase in <lang xml:lang="CODE">...</lang>.
+${this.defaultLang.charAt(0).toUpperCase() + this.defaultLang.slice(1)} text gets no tag. Return ONLY the tagged text, nothing else.`;
   }
 
-  /** Pre-connect all language connections in parallel. */
+  /** Pre-connect all language connections + warm up tagging LLM in parallel. */
   async warmup(): Promise<void> {
     log.info('Warming up TTS connections...');
     const start = performance.now();
     try {
-      const langs = Object.keys(this.models);
-      await Promise.all(langs.map((lang) => this.ensureConnection(lang)));
-      log.info(`TTS warmup complete in ${(performance.now() - start).toFixed(0)}ms (${langs.length} connection(s))`);
+      const tasks: Promise<void>[] = Object.keys(this.models).map((lang) => this.ensureConnection(lang));
+      if (this.openRouterApiKey && this.multiLanguage) {
+        tasks.push(this.warmupTagging());
+      }
+      await Promise.all(tasks);
+      log.info(`TTS warmup complete in ${(performance.now() - start).toFixed(0)}ms`);
     } catch (err) {
       log.warn('TTS warmup failed (non-fatal):', err);
+    }
+  }
+
+  /** Prime the tagging LLM with a short request to warm up the connection. */
+  private async warmupTagging(): Promise<void> {
+    try {
+      const start = performance.now();
+      await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.openRouterApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: this.tagModel,
+          messages: [
+            { role: 'system', content: this.tagSystemPrompt },
+            { role: 'user', content: 'Hello' },
+          ],
+          max_tokens: 10,
+        }),
+      });
+      log.info(`Tagging LLM warmup complete in ${(performance.now() - start).toFixed(0)}ms`);
+    } catch (err) {
+      log.warn('Tagging LLM warmup failed (non-fatal):', err);
     }
   }
 
@@ -209,81 +233,67 @@ export class DeepgramTTS implements TTSPlugin {
       .trim();
   }
 
+  /** Add SSML language tags via a fast LLM (multi-language only). */
+  async preprocessText(text: string, signal?: AbortSignal): Promise<string> {
+    if (!this.openRouterApiKey || !this.multiLanguage) return text;
+    if (signal?.aborted) return text;
+
+    try {
+      const start = performance.now();
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.openRouterApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: this.tagModel,
+          messages: [
+            { role: 'system', content: this.tagSystemPrompt },
+            { role: 'user', content: text },
+          ],
+          max_tokens: Math.max(256, text.length * 2),
+        }),
+        signal,
+      });
+
+      if (!res.ok) {
+        log.warn(`Tagging LLM returned ${res.status} — using untagged text`);
+        return text;
+      }
+
+      const json = (await res.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+      const tagged = json.choices?.[0]?.message?.content?.trim();
+
+      if (!tagged) {
+        log.warn('Tagging LLM returned empty response — using untagged text');
+        return text;
+      }
+
+      log.debug(`Tagged in ${(performance.now() - start).toFixed(0)}ms: "${tagged.slice(0, 80)}"`);
+      return tagged;
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') return text;
+      log.warn('Tagging LLM failed — using untagged text:', err);
+      return text;
+    }
+  }
+
   async *synthesize(text: string, signal?: AbortSignal): AsyncGenerator<Buffer> {
     if (signal?.aborted) return;
 
-    let segments = this.multiLanguage
+    const segments = this.multiLanguage
       ? parseLangSegments(text, this.defaultLang)
       : [{ lang: this.defaultLang, text }];
-
-    // Auto-detect language for untagged default-language segments
-    if (this.multiLanguage) {
-      segments = this.autoDetectSegments(segments);
-    }
 
     for (const segment of segments) {
       if (signal?.aborted) break;
       if (!segment.text.trim()) continue;
-
       const lang = this.models[segment.lang] ? segment.lang : this.defaultLang;
       yield* this.synthesizeSegment(lang, segment.text, signal);
     }
-  }
-
-  /**
-   * Split untagged default-language segments into sentences and detect
-   * the language of each sentence using character markers.
-   * Merges consecutive same-language sentences back together.
-   */
-  private autoDetectSegments(segments: LangSegment[]): LangSegment[] {
-    const result: LangSegment[] = [];
-
-    for (const seg of segments) {
-      // Only process untagged (default language) segments
-      if (seg.lang !== this.defaultLang) {
-        result.push(seg);
-        continue;
-      }
-
-      // Split into sentences and detect language per sentence
-      const sentences = splitSentences(seg.text);
-      if (sentences.length <= 1) {
-        const detected = this.detectLang(seg.text);
-        if (detected !== this.defaultLang) {
-          log.debug(`Auto-detected [${detected}] for: "${seg.text.slice(0, 40)}"`);
-        }
-        result.push({ lang: detected, text: seg.text });
-        continue;
-      }
-
-      // Detect per sentence and merge consecutive same-language runs
-      let current: LangSegment | null = null;
-      for (const sentence of sentences) {
-        const lang = this.detectLang(sentence);
-        if (lang !== this.defaultLang) {
-          log.debug(`Auto-detected [${lang}] for: "${sentence.slice(0, 40)}"`);
-        }
-        if (current && current.lang === lang) {
-          current.text += ' ' + sentence;
-        } else {
-          if (current) result.push(current);
-          current = { lang, text: sentence };
-        }
-      }
-      if (current) result.push(current);
-    }
-
-    return result;
-  }
-
-  /** Detect language of text using character markers. Returns default if no markers found. */
-  private detectLang(text: string): string {
-    for (const lang of Object.keys(this.models)) {
-      if (lang === this.defaultLang) continue;
-      const pattern = LANG_DETECT_PATTERNS[lang];
-      if (pattern && pattern.test(text)) return lang;
-    }
-    return this.defaultLang;
   }
 
   private async *synthesizeSegment(
