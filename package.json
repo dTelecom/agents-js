@@ -62,7 +62,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@dtelecom/server-sdk-js": "^3.0.0",
+    "@dtelecom/server-sdk-js": "^3.3.0",
     "@dtelecom/server-sdk-node": "^0.2.5",
     "@huggingface/transformers": "^3.8.1",
     "@types/better-sqlite3": "^7.6.13",
