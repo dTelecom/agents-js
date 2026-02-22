@@ -258,6 +258,12 @@ export class VoiceAgent extends EventEmitter {
     }
 
     this.pipeline?.removeParticipant(identity);
+
+    // If no remote participants remain, stop the agent (process cleanup)
+    if (this._running && this.connection?.room.remoteParticipants.size === 0) {
+      log.info('All participants left — stopping agent');
+      this.stop();
+    }
   }
 
   private async pipeAudioToSTT(

@@ -191,6 +191,8 @@ export class Pipeline extends EventEmitter {
     }
     this.sttStreams.clear();
 
+    this.tts?.close?.();
+
     log.info('Pipeline stopped');
   }
 

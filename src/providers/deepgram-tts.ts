@@ -172,6 +172,17 @@ export class DeepgramTTS implements TTSPlugin {
     }
   }
 
+  /** Close all WebSocket connections to allow clean process exit. */
+  close(): void {
+    for (const [lang, ws] of this.connections) {
+      log.debug(`Closing WebSocket for [${lang}]`);
+      ws.close();
+    }
+    this.connections.clear();
+    this.connectPromises.clear();
+    this.flushStates.clear();
+  }
+
   /** Pre-connect all language WebSocket connections. */
   async warmup(): Promise<void> {
     log.info('Warming up TTS connections...');

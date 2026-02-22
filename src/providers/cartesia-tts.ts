@@ -86,6 +86,17 @@ export class CartesiaTTS implements TTSPlugin {
     this.emotion = options.emotion;
   }
 
+  /** Close the WebSocket connection to allow clean process exit. */
+  close(): void {
+    if (this.ws) {
+      log.debug('Closing Cartesia WebSocket');
+      this.ws.close();
+      this.ws = null;
+    }
+    this._connected = false;
+    this.connectPromise = null;
+  }
+
   /** Pre-connect the WebSocket so first synthesize() doesn't pay connection cost. */
   async warmup(): Promise<void> {
     log.info('Warming up TTS connection...');

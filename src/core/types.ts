@@ -55,6 +55,8 @@ export interface TTSPlugin {
   cleanText?(text: string): string;
   /** Default language code (e.g. 'en'). Used by Pipeline to skip wrapping default-lang segments. */
   defaultLanguage?: string;
+  /** Close all underlying connections (WebSockets, etc.) to allow clean process exit. */
+  close?(): void;
 }
 
 // ─── Memory Config ───────────────────────────────────────────────────────────
