@@ -1,6 +1,6 @@
 {
   "name": "@dtelecom/agents-js",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "AI voice agent framework for dTelecom rooms",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

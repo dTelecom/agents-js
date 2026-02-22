@@ -66,6 +66,8 @@ export interface MemoryConfig {
   enabled: boolean;
   /** Path to SQLite database file (default: './data/memory.db') */
   dbPath?: string;
+  /** Override room name as memory scope (e.g. userId for cross-room persistence) */
+  scope?: string;
 }
 
 // ─── Agent Config ────────────────────────────────────────────────────────────

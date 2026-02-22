@@ -73,7 +73,7 @@ export class VoiceAgent extends EventEmitter {
       const { RoomMemory } = await import('../memory/room-memory');
       this.memory = new RoomMemory({
         dbPath: this.config.memory.dbPath ?? './data/memory.db',
-        room: options.room,
+        room: this.config.memory.scope ?? options.room,
       });
       await this.memory.init();
       this.memory.startSession();
