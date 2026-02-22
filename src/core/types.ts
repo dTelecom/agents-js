@@ -32,8 +32,9 @@ export interface Message {
 }
 
 export interface LLMChunk {
-  type: 'token' | 'tool_call' | 'done';
+  type: 'token' | 'segment' | 'tool_call' | 'done';
   token?: string;
+  segment?: { lang: string; text: string };
   toolCall?: { name: string; arguments: string };
   usage?: { promptTokens: number; completionTokens: number };
 }
@@ -52,8 +53,8 @@ export interface TTSPlugin {
   warmup?(): Promise<void>;
   /** Strip provider-specific markup from text for display/events. */
   cleanText?(text: string): string;
-  /** Transform text before synthesis (e.g., add language tags). Called by Pipeline per sentence. */
-  preprocessText?(text: string, signal?: AbortSignal): Promise<string>;
+  /** Default language code (e.g. 'en'). Used by Pipeline to skip wrapping default-lang segments. */
+  defaultLanguage?: string;
 }
 
 // ─── Memory Config ───────────────────────────────────────────────────────────
@@ -84,6 +85,8 @@ export interface AgentConfig {
   onDataMessage?: DataMessageHandler;
   /** Persistent memory across sessions (stores turns, enables semantic search) */
   memory?: MemoryConfig;
+  /** Max context tokens before triggering summarization (default: 5000) */
+  maxContextTokens?: number;
 }
 
 export interface AgentStartOptions {
@@ -125,6 +128,8 @@ export interface PipelineOptions {
   beforeRespond?: (speaker: string, text: string) => boolean | Promise<boolean>;
   /** Room memory instance (injected by VoiceAgent if memory is enabled) */
   memory?: import('../memory/room-memory').RoomMemory;
+  /** Max context tokens before triggering summarization (default: 5000) */
+  maxContextTokens?: number;
 }
 
 // ─── Events ──────────────────────────────────────────────────────────────────

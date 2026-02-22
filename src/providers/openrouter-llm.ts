@@ -29,6 +29,11 @@ export interface OpenRouterLLMOptions {
     /** Allow fallback to other providers if pinned ones fail */
     allowFallbacks?: boolean;
   };
+  /** Structured output via constrained decoding (e.g. for multi-language segment routing) */
+  responseFormat?: {
+    type: 'json_schema';
+    json_schema: { name: string; strict: boolean; schema: Record<string, unknown> };
+  };
 }
 
 export class OpenRouterLLM implements LLMPlugin {
@@ -37,6 +42,7 @@ export class OpenRouterLLM implements LLMPlugin {
   private readonly maxTokens: number;
   private readonly temperature: number;
   private readonly provider?: { sort?: string; order?: string[]; allow_fallbacks?: boolean };
+  private readonly responseFormat?: OpenRouterLLMOptions['responseFormat'];
 
   constructor(options: OpenRouterLLMOptions) {
     if (!options.apiKey) {
@@ -54,6 +60,8 @@ export class OpenRouterLLM implements LLMPlugin {
         allow_fallbacks: options.providerRouting.allowFallbacks,
       };
     }
+
+    this.responseFormat = options.responseFormat;
   }
 
   /**
@@ -89,7 +97,14 @@ export class OpenRouterLLM implements LLMPlugin {
       stream: true,
     };
     if (this.provider) {
-      body.provider = this.provider;
+      body.provider = { ...this.provider };
+    }
+    if (this.responseFormat) {
+      body.response_format = this.responseFormat;
+      // Ensure the provider enforces structured output parameters
+      const prov = (body.provider ?? {}) as Record<string, unknown>;
+      prov.require_parameters = true;
+      body.provider = prov;
     }
 
     log.debug(`LLM request: model=${this.model}, messages=${messages.length}`);
@@ -117,6 +132,12 @@ export class OpenRouterLLM implements LLMPlugin {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+
+    // Structured output: accumulate JSON tokens to detect completed segments
+    const structured = !!this.responseFormat;
+    let jsonBuffer = '';
+    let lastSegmentIndex = 0;
+    const segmentRe = /\{"lang"\s*:\s*"(\w+)"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g;
 
     try {
       while (true) {
@@ -148,7 +169,25 @@ export class OpenRouterLLM implements LLMPlugin {
 
             const delta = choice.delta;
             if (delta?.content) {
-              yield { type: 'token', token: delta.content };
+              if (structured) {
+                // Structured mode: only yield segment chunks, not raw JSON tokens
+                jsonBuffer += delta.content;
+                segmentRe.lastIndex = lastSegmentIndex;
+                let match: RegExpExecArray | null;
+                while ((match = segmentRe.exec(jsonBuffer)) !== null) {
+                  const lang = match[1];
+                  // Unescape JSON string escapes (e.g. \" → ", \n → newline)
+                  const text = match[2].replace(/\\(.)/g, (_, c) => {
+                    if (c === 'n') return '\n';
+                    if (c === 't') return '\t';
+                    return c;
+                  });
+                  lastSegmentIndex = segmentRe.lastIndex;
+                  yield { type: 'segment', segment: { lang, text } };
+                }
+              } else {
+                yield { type: 'token', token: delta.content };
+              }
             }
 
             // Usage stats in the final chunk
@@ -169,6 +208,10 @@ export class OpenRouterLLM implements LLMPlugin {
       }
     } finally {
       reader.releaseLock();
+    }
+
+    if (structured && lastSegmentIndex === 0 && jsonBuffer.length > 0) {
+      log.warn(`Structured response yielded no segments. Raw buffer (first 200 chars): "${jsonBuffer.slice(0, 200)}"`);
     }
 
     yield { type: 'done' };

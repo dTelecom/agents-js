@@ -208,7 +208,7 @@ export class RoomMemory {
       const messages: Message[] = [
         {
           role: 'system',
-          content: 'Summarize this tutoring session concisely. Include: topics covered, phrases practiced, mistakes the student made, what they struggled with, and what they did well. Be factual and brief.',
+          content: 'Summarize this conversation concisely. Include: key topics discussed, decisions made, and important details. Be factual and brief.',
         },
         { role: 'user', content: transcript },
       ];

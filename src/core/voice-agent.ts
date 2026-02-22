@@ -107,6 +107,7 @@ export class VoiceAgent extends EventEmitter {
       agentName: this.config.agentName,
       nameVariants: this.config.nameVariants,
       memory: this.memory ?? undefined,
+      maxContextTokens: this.config.maxContextTokens,
     });
 
     // Forward pipeline events

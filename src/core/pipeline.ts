@@ -85,6 +85,7 @@ export class Pipeline extends EventEmitter {
     this.memory = options.memory;
     this.context = new ContextManager({
       instructions: options.instructions,
+      maxContextTokens: options.maxContextTokens,
     });
     this.turnDetector = new TurnDetector({
       silenceTimeoutMs: options.silenceTimeoutMs,
@@ -306,10 +307,41 @@ export class Pipeline extends EventEmitter {
 
       const wake = () => { wakeConsumer?.(); };
 
+      /** Push a sentence to the queue with first-sentence tracking. */
+      let isFirstSentence = true;
+      const pushSentence = (text: string) => {
+        if (signal.aborted) return;
+        if (isFirstSentence) {
+          tFirstSentence = performance.now();
+          isFirstSentence = false;
+          log.info(`first_sentence: ${(tFirstSentence - tSpeechEnd).toFixed(0)}ms — "${text.slice(0, 60)}"`);
+        }
+        sentenceQueue.push(text);
+        wake();
+      };
+
       // ── Producer: consume LLM stream, split into sentences ──
       const producer = async () => {
-        let isFirstToken = true;
-        let isFirstSentence = true;
+        let isFirstChunk = true;
+
+        // Segment accumulation: collect segments, flush at sentence boundaries
+        // so that language tags stay intact and sentences aren't fragmented.
+        const defaultLang = this.tts?.defaultLanguage;
+        const segBuf: Array<{ lang: string; text: string }> = [];
+
+        const flushSegments = () => {
+          if (segBuf.length === 0) return;
+
+          const combined = segBuf
+            .map((s) =>
+              s.lang !== defaultLang
+                ? `<lang xml:lang="${s.lang}">${s.text}</lang>`
+                : s.text,
+            )
+            .join(' ');
+          segBuf.length = 0;
+          pushSentence(combined);
+        };
 
         const llmStream = this.llm.chat(messages, signal);
         try {
@@ -318,10 +350,29 @@ export class Pipeline extends EventEmitter {
             if (done || !chunk) break;
             if (signal.aborted) break;
 
-            if (chunk.type === 'token' && chunk.token) {
-              if (isFirstToken) {
+            if (chunk.type === 'segment' && chunk.segment) {
+              // Structured output: accumulate segments, flush at sentence boundaries
+              if (isFirstChunk) {
                 tLlmFirstToken = performance.now();
-                isFirstToken = false;
+                isFirstChunk = false;
+                log.info(`llm_first_segment: ${(tLlmFirstToken - tSpeechEnd).toFixed(0)}ms`);
+              }
+
+              // Track clean text for context/memory (not JSON)
+              if (fullResponse) fullResponse += ' ';
+              fullResponse += chunk.segment.text;
+
+              segBuf.push(chunk.segment);
+
+              // Flush at sentence boundaries (.!? optionally followed by quotes/parens)
+              if (/[.!?]["'»)]*\s*$/.test(chunk.segment.text)) {
+                flushSegments();
+              }
+            } else if (chunk.type === 'token' && chunk.token) {
+              // Plain text mode (no structured output)
+              if (isFirstChunk) {
+                tLlmFirstToken = performance.now();
+                isFirstChunk = false;
                 log.info(`llm_first_token: ${(tLlmFirstToken - tSpeechEnd).toFixed(0)}ms`);
               }
 
@@ -329,14 +380,7 @@ export class Pipeline extends EventEmitter {
 
               const sentences = this.splitter.push(chunk.token);
               for (const sentence of sentences) {
-                if (signal.aborted) break;
-                if (isFirstSentence) {
-                  tFirstSentence = performance.now();
-                  isFirstSentence = false;
-                  log.info(`first_sentence: ${(tFirstSentence - tSpeechEnd).toFixed(0)}ms — "${sentence.slice(0, 60)}"`);
-                }
-                sentenceQueue.push(sentence);
-                wake();
+                pushSentence(sentence);
               }
             }
           }
@@ -344,17 +388,16 @@ export class Pipeline extends EventEmitter {
           await llmStream.return(undefined);
         }
 
-        // Flush remaining text from splitter
+        // Flush remaining text
         if (!signal.aborted) {
+          flushSegments();
           const remaining = this.splitter.flush();
           if (remaining) {
-            if (isFirstSentence) {
-              tFirstSentence = performance.now();
-              isFirstSentence = false;
-              log.info(`first_sentence (flush): ${(tFirstSentence - tSpeechEnd).toFixed(0)}ms — "${remaining.slice(0, 60)}"`);
-            }
-            sentenceQueue.push(remaining);
-            wake();
+            pushSentence(remaining);
+          }
+
+          if (!fullResponse.trim()) {
+            log.warn('LLM produced no output (empty response or no segments detected)');
           }
         }
 
@@ -378,17 +421,12 @@ export class Pipeline extends EventEmitter {
                 log.debug(`Skipping non-word sentence: "${sentence}"`);
                 continue;
               }
-              // Preprocess (e.g. add language tags) before synthesis
-              let processed = sentence;
-              if (this.tts?.preprocessText) {
-                processed = await this.tts.preprocessText(sentence, signal);
-              }
-              await this.synthesizeAndPlay(processed, signal, (t) => {
+              await this.synthesizeAndPlay(sentence, signal, (t) => {
                 if (!tFirstAudioPlayed) {
                   tFirstAudioPlayed = t;
                   this.setAgentState('speaking');
                 }
-                this.emit('sentence', this.cleanText(processed));
+                this.emit('sentence', this.cleanText(sentence));
               });
               continue;
             }
@@ -461,7 +499,7 @@ export class Pipeline extends EventEmitter {
 
   /**
    * Speak text directly via TTS, bypassing the LLM.
-   * Supports barge-in — if the student speaks, the greeting is cut short.
+   * Supports barge-in — if a participant speaks, the playback is cut short.
    * Adds the text to conversation context so the LLM knows what was said.
    */
   async say(text: string): Promise<void> {
@@ -479,22 +517,16 @@ export class Pipeline extends EventEmitter {
       this.audioOutput.beginResponse();
       this.setAgentState('thinking');
 
-      // Preprocess (e.g. add language tags) before synthesis
-      let processed = text;
-      if (this.tts?.preprocessText) {
-        processed = await this.tts.preprocessText(text, signal);
-      }
-
-      await this.synthesizeAndPlay(processed, signal, () => {
+      await this.synthesizeAndPlay(text, signal, () => {
         this.setAgentState('speaking');
-        this.emit('sentence', this.cleanText(processed));
+        this.emit('sentence', this.cleanText(text));
       });
 
       if (!signal.aborted) {
         await this.audioOutput.writeSilence(40);
         this.context.addAgentTurn(text);
         this.memory?.storeTurn('assistant', text, true);
-        this.emit('response', this.cleanText(processed));
+        this.emit('response', this.cleanText(text));
       }
 
       // Wait for audio pipeline to drain before signaling "listening"
