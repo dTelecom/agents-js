@@ -41,8 +41,13 @@ export interface LLMChunk {
   usage?: { promptTokens: number; completionTokens: number };
 }
 
+export interface LLMChatOptions {
+  /** Skip structured output (responseFormat) for this call — return plain text tokens. */
+  plainText?: boolean;
+}
+
 export interface LLMPlugin {
-  chat(messages: Message[], signal?: AbortSignal): AsyncGenerator<LLMChunk>;
+  chat(messages: Message[], signal?: AbortSignal, options?: LLMChatOptions): AsyncGenerator<LLMChunk>;
   /** Optional: warm up the LLM connection with the system prompt */
   warmup?(systemPrompt: string): Promise<void>;
 }

@@ -49,6 +49,7 @@ export type {
   TranscriptionResult,
   LLMPlugin,
   LLMChunk,
+  LLMChatOptions,
   Message,
   TTSPlugin,
   RespondMode,

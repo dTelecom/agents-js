@@ -214,7 +214,7 @@ export class RoomMemory {
       ];
 
       let summary = '';
-      for await (const chunk of llm.chat(messages)) {
+      for await (const chunk of llm.chat(messages, undefined, { plainText: true })) {
         if (chunk.type === 'token' && chunk.token) {
           summary += chunk.token;
         }

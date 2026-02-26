@@ -5,7 +5,7 @@
  * No SDK dependency — just HTTP.
  */
 
-import type { LLMPlugin, LLMChunk, Message } from '../core/types';
+import type { LLMPlugin, LLMChunk, LLMChatOptions, Message } from '../core/types';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('OpenRouterLLM');
@@ -88,7 +88,7 @@ export class OpenRouterLLM implements LLMPlugin {
     }
   }
 
-  async *chat(messages: Message[], signal?: AbortSignal): AsyncGenerator<LLMChunk> {
+  async *chat(messages: Message[], signal?: AbortSignal, options?: LLMChatOptions): AsyncGenerator<LLMChunk> {
     const body: Record<string, unknown> = {
       model: this.model,
       messages,
@@ -99,7 +99,7 @@ export class OpenRouterLLM implements LLMPlugin {
     if (this.provider) {
       body.provider = { ...this.provider };
     }
-    if (this.responseFormat) {
+    if (this.responseFormat && !options?.plainText) {
       body.response_format = this.responseFormat;
       // Ensure the provider enforces structured output parameters
       const prov = (body.provider ?? {}) as Record<string, unknown>;
@@ -136,7 +136,7 @@ export class OpenRouterLLM implements LLMPlugin {
     // Structured output: stream segment objects as they complete in the JSON buffer.
     // Tracks brace depth to detect complete {...} objects inside the "segments" array,
     // then parses each with JSON.parse() — correct and streaming.
-    const structured = !!this.responseFormat;
+    const structured = !!this.responseFormat && !options?.plainText;
     let jsonBuffer = '';
     let segmentsYielded = false;
     let lastUsage: { promptTokens: number; completionTokens: number } | undefined;
