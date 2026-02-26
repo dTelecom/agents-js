@@ -60,6 +60,15 @@ export class VoiceAgent extends EventEmitter {
     await this.pipeline.say(text);
   }
 
+  /**
+   * Switch STT language on all active streams.
+   * Use for bilingual lessons — e.g. switch to 'es' with forceWhisper when
+   * expecting Spanish, back to 'auto' for Parakeet auto-detect otherwise.
+   */
+  setSTTLanguage(language: string, options?: { forceWhisper?: boolean }): void {
+    this.pipeline?.setSTTLanguage(language, options);
+  }
+
   /** Start the agent — connect to room and begin listening. */
   async start(options: AgentStartOptions): Promise<void> {
     if (this._running) {
@@ -112,7 +121,7 @@ export class VoiceAgent extends EventEmitter {
 
     // Forward pipeline events
     this.pipeline.on('transcription', (result) => this.emit('transcription', result));
-    this.pipeline.on('sentence', (text) => this.emit('sentence', text));
+    this.pipeline.on('sentence', (text, raw) => this.emit('sentence', text, raw));
     this.pipeline.on('response', (text) => this.emit('response', text));
     this.pipeline.on('agentState', (state) => this.emit('agentState', state));
     this.pipeline.on('error', (error) => this.emit('error', error));

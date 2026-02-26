@@ -207,9 +207,22 @@ export class DeepgramTTS implements TTSPlugin {
   async *synthesize(text: string, signal?: AbortSignal): AsyncGenerator<Buffer> {
     if (signal?.aborted) return;
 
-    const segments = this.multiLanguage
+    const rawSegments = this.multiLanguage
       ? parseLangSegments(text, this.defaultLang)
       : [{ lang: this.defaultLang, text }];
+
+    // Merge punctuation-only segments into the previous segment.
+    // After <lang> tag splitting, trailing punctuation (e.g. "?" or ".") can end up
+    // in its own segment. It belongs to the previous phrase for correct intonation.
+    const segments: typeof rawSegments = [];
+    for (const seg of rawSegments) {
+      if (!seg.text.trim()) continue;
+      if (!/\p{L}/u.test(seg.text) && segments.length > 0) {
+        segments[segments.length - 1].text += seg.text;
+      } else {
+        segments.push(seg);
+      }
+    }
 
     // 200ms silence buffer for gaps between language switches
     // PCM16 mono: sampleRate * 0.2 * 2 bytes per sample
@@ -219,7 +232,6 @@ export class DeepgramTTS implements TTSPlugin {
     let prevLang: string | null = null;
     for (const segment of segments) {
       if (signal?.aborted) break;
-      if (!segment.text.trim()) continue;
       const lang = this.models[segment.lang] ? segment.lang : this.defaultLang;
 
       // Insert silence when switching between languages

@@ -200,14 +200,24 @@ export class Pipeline extends EventEmitter {
     return this.context;
   }
 
+  /** Switch STT language on all active streams (e.g. for bilingual lessons). */
+  setSTTLanguage(language: string, options?: { forceWhisper?: boolean }): void {
+    for (const [identity, stream] of this.sttStreams) {
+      if (stream.setLanguage) {
+        stream.setLanguage(language, options);
+        log.info(`STT language → ${language}${options?.forceWhisper ? ' (whisper)' : ''} for "${identity}"`);
+      }
+    }
+  }
+
   private lastFinalAt = 0;
   private lastSttDuration = 0;
 
   private async handleTranscription(speaker: string, result: TranscriptionResult): Promise<void> {
     this.emit('transcription', { ...result, speaker });
 
-    // Non-empty interim → user is speaking
-    if (!result.isFinal && result.text.trim()) {
+    // Any interim (including empty VAD speech_start) → user is speaking
+    if (!result.isFinal) {
       this.setAgentState('listening');
     }
 
@@ -323,83 +333,94 @@ export class Pipeline extends EventEmitter {
       };
 
       // ── Producer: consume LLM stream, split into sentences ──
+      const MAX_LLM_RETRIES = 2;
+
       const producer = async () => {
-        let isFirstChunk = true;
-
-        // Segment accumulation: collect segments, flush at sentence boundaries
-        // so that language tags stay intact and sentences aren't fragmented.
         const defaultLang = this.tts?.defaultLanguage;
-        const segBuf: Array<{ lang: string; text: string }> = [];
 
-        const flushSegments = () => {
-          if (segBuf.length === 0) return;
+        for (let attempt = 0; attempt <= MAX_LLM_RETRIES; attempt++) {
+          if (signal.aborted) break;
 
-          const combined = segBuf
-            .map((s) =>
-              s.lang !== defaultLang
-                ? `<lang xml:lang="${s.lang}">${s.text}</lang>`
-                : s.text,
-            )
-            .join(' ');
-          segBuf.length = 0;
-          pushSentence(combined);
-        };
+          if (attempt > 0) {
+            log.warn(`LLM retry ${attempt}/${MAX_LLM_RETRIES}...`);
+            this.splitter.reset();
+          }
 
-        const llmStream = this.llm.chat(messages, signal);
-        try {
-          while (!signal.aborted) {
-            const { value: chunk, done } = await llmStream.next();
-            if (done || !chunk) break;
-            if (signal.aborted) break;
+          let isFirstChunk = true;
+          const segBuf: Array<{ lang: string; text: string }> = [];
 
-            if (chunk.type === 'segment' && chunk.segment) {
-              // Structured output: accumulate segments, flush at sentence boundaries
-              if (isFirstChunk) {
-                tLlmFirstToken = performance.now();
-                isFirstChunk = false;
-                log.info(`llm_first_segment: ${(tLlmFirstToken - tSpeechEnd).toFixed(0)}ms`);
-              }
+          const flushSegments = () => {
+            if (segBuf.length === 0) return;
 
-              // Track clean text for context/memory (not JSON)
-              if (fullResponse) fullResponse += ' ';
-              fullResponse += chunk.segment.text;
+            const combined = segBuf
+              .map((s) =>
+                s.lang !== defaultLang
+                  ? `<lang xml:lang="${s.lang}">${s.text}</lang>`
+                  : s.text,
+              )
+              .join(' ');
+            segBuf.length = 0;
+            pushSentence(combined);
+          };
 
-              segBuf.push(chunk.segment);
+          const llmStream = this.llm.chat(messages, signal);
+          try {
+            while (!signal.aborted) {
+              const { value: chunk, done } = await llmStream.next();
+              if (done || !chunk) break;
+              if (signal.aborted) break;
 
-              // Flush at sentence boundaries (.!? optionally followed by quotes/parens)
-              if (/[.!?]["'»)]*\s*$/.test(chunk.segment.text)) {
-                flushSegments();
-              }
-            } else if (chunk.type === 'token' && chunk.token) {
-              // Plain text mode (no structured output)
-              if (isFirstChunk) {
-                tLlmFirstToken = performance.now();
-                isFirstChunk = false;
-                log.info(`llm_first_token: ${(tLlmFirstToken - tSpeechEnd).toFixed(0)}ms`);
-              }
+              if (chunk.type === 'segment' && chunk.segment) {
+                // Structured output: accumulate segments, flush at sentence boundaries
+                if (isFirstChunk) {
+                  tLlmFirstToken = performance.now();
+                  isFirstChunk = false;
+                  log.info(`llm_first_segment: ${(tLlmFirstToken - tSpeechEnd).toFixed(0)}ms`);
+                }
 
-              fullResponse += chunk.token;
+                // Track clean text for context/memory (not JSON)
+                if (fullResponse) fullResponse += ' ';
+                fullResponse += chunk.segment.text;
 
-              const sentences = this.splitter.push(chunk.token);
-              for (const sentence of sentences) {
-                pushSentence(sentence);
+                segBuf.push(chunk.segment);
+
+                // Flush at sentence boundaries (.!? optionally followed by quotes/parens)
+                if (/[.!?]["'»)]*\s*$/.test(chunk.segment.text)) {
+                  flushSegments();
+                }
+              } else if (chunk.type === 'token' && chunk.token) {
+                // Plain text mode (no structured output)
+                if (isFirstChunk) {
+                  tLlmFirstToken = performance.now();
+                  isFirstChunk = false;
+                  log.info(`llm_first_token: ${(tLlmFirstToken - tSpeechEnd).toFixed(0)}ms`);
+                }
+
+                fullResponse += chunk.token;
+
+                const sentences = this.splitter.push(chunk.token);
+                for (const sentence of sentences) {
+                  pushSentence(sentence);
+                }
               }
             }
-          }
-        } finally {
-          await llmStream.return(undefined);
-        }
-
-        // Flush remaining text
-        if (!signal.aborted) {
-          flushSegments();
-          const remaining = this.splitter.flush();
-          if (remaining) {
-            pushSentence(remaining);
+          } finally {
+            await llmStream.return(undefined);
           }
 
-          if (!fullResponse.trim()) {
-            log.warn('LLM produced no output (empty response or no segments detected)');
+          // Flush remaining text
+          if (!signal.aborted) {
+            flushSegments();
+            const remaining = this.splitter.flush();
+            if (remaining) {
+              pushSentence(remaining);
+            }
+
+            if (fullResponse.trim()) {
+              break; // Got output — done
+            }
+
+            log.warn(`LLM produced no output (attempt ${attempt + 1}/${MAX_LLM_RETRIES + 1})`);
           }
         }
 
@@ -428,7 +449,7 @@ export class Pipeline extends EventEmitter {
                   tFirstAudioPlayed = t;
                   this.setAgentState('speaking');
                 }
-                this.emit('sentence', this.cleanText(sentence));
+                this.emit('sentence', this.cleanText(sentence), sentence);
               });
               continue;
             }
@@ -521,7 +542,7 @@ export class Pipeline extends EventEmitter {
 
       await this.synthesizeAndPlay(text, signal, () => {
         this.setAgentState('speaking');
-        this.emit('sentence', this.cleanText(text));
+        this.emit('sentence', this.cleanText(text), text);
       });
 
       if (!signal.aborted) {

@@ -15,6 +15,8 @@ export interface STTStreamOptions {
 
 export interface STTStream {
   sendAudio(pcm16: Buffer): void;
+  /** Switch language mid-session (only supported by some providers, e.g. DtelecomSTT) */
+  setLanguage?(language: string, options?: { forceWhisper?: boolean }): void;
   on(event: 'transcription', cb: (result: TranscriptionResult) => void): this;
   on(event: 'error', cb: (error: Error) => void): this;
   close(): Promise<void>;

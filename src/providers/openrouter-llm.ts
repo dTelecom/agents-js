@@ -133,11 +133,87 @@ export class OpenRouterLLM implements LLMPlugin {
     const decoder = new TextDecoder();
     let buffer = '';
 
-    // Structured output: accumulate JSON tokens to detect completed segments
+    // Structured output: stream segment objects as they complete in the JSON buffer.
+    // Tracks brace depth to detect complete {...} objects inside the "segments" array,
+    // then parses each with JSON.parse() — correct and streaming.
     const structured = !!this.responseFormat;
     let jsonBuffer = '';
-    let lastSegmentIndex = 0;
-    const segmentRe = /\{"lang"\s*:\s*"(\w+)"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g;
+    let segmentsYielded = false;
+    let lastUsage: { promptTokens: number; completionTokens: number } | undefined;
+
+    // Streaming segment extraction state
+    let inSegmentsArray = false;  // true after we see "segments" : [
+    let objectStart = -1;         // index where current { started
+    let braceDepth = 0;           // nested brace depth inside current object
+    let scanIndex = 0;            // how far we've scanned in jsonBuffer
+    let inString = false;         // inside a JSON string literal
+    let escaped = false;          // previous char was backslash
+
+    function extractSegments(buf: string): Array<{ lang: string; text: string }> {
+      const results: Array<{ lang: string; text: string }> = [];
+
+      for (let i = scanIndex; i < buf.length; i++) {
+        const ch = buf[i];
+
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+
+        if (ch === '\\' && inString) {
+          escaped = true;
+          continue;
+        }
+
+        if (ch === '"') {
+          inString = !inString;
+          continue;
+        }
+
+        if (inString) continue;
+
+        // Detect start of segments array: look for [ after "segments"
+        if (!inSegmentsArray) {
+          if (ch === '[') {
+            // Check if "segments" precedes this bracket
+            const before = buf.slice(0, i).trimEnd();
+            if (before.endsWith(':') && buf.slice(0, i).includes('"segments"')) {
+              inSegmentsArray = true;
+            }
+          }
+          continue;
+        }
+
+        // Inside segments array — track objects
+        if (ch === '{') {
+          if (braceDepth === 0) objectStart = i;
+          braceDepth++;
+        } else if (ch === '}') {
+          braceDepth--;
+          if (braceDepth === 0 && objectStart >= 0) {
+            // Complete segment object
+            const objStr = buf.slice(objectStart, i + 1);
+            try {
+              const seg = JSON.parse(objStr);
+              if (seg.lang && seg.text) {
+                results.push({ lang: seg.lang, text: seg.text });
+              }
+            } catch {
+              // Incomplete or malformed — skip
+            }
+            objectStart = -1;
+          }
+        } else if (ch === ']' && braceDepth === 0) {
+          // End of segments array
+          inSegmentsArray = false;
+        }
+      }
+
+      // Always advance — state vars (braceDepth, inString, etc.) already
+      // track parsing state, so rescanning would double-count characters.
+      scanIndex = buf.length;
+      return results;
+    }
 
     try {
       while (true) {
@@ -157,10 +233,7 @@ export class OpenRouterLLM implements LLMPlugin {
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
 
           const data = trimmed.slice(6);
-          if (data === '[DONE]') {
-            yield { type: 'done' };
-            return;
-          }
+          if (data === '[DONE]') break;
 
           try {
             const parsed = JSON.parse(data);
@@ -170,20 +243,13 @@ export class OpenRouterLLM implements LLMPlugin {
             const delta = choice.delta;
             if (delta?.content) {
               if (structured) {
-                // Structured mode: only yield segment chunks, not raw JSON tokens
                 jsonBuffer += delta.content;
-                segmentRe.lastIndex = lastSegmentIndex;
-                let match: RegExpExecArray | null;
-                while ((match = segmentRe.exec(jsonBuffer)) !== null) {
-                  const lang = match[1];
-                  // Unescape JSON string escapes (e.g. \" → ", \n → newline)
-                  const text = match[2].replace(/\\(.)/g, (_, c) => {
-                    if (c === 'n') return '\n';
-                    if (c === 't') return '\t';
-                    return c;
-                  });
-                  lastSegmentIndex = segmentRe.lastIndex;
-                  yield { type: 'segment', segment: { lang, text } };
+
+                // Try to extract any newly completed segments
+                const segments = extractSegments(jsonBuffer);
+                for (const seg of segments) {
+                  yield { type: 'segment', segment: seg };
+                  segmentsYielded = true;
                 }
               } else {
                 yield { type: 'token', token: delta.content };
@@ -192,14 +258,10 @@ export class OpenRouterLLM implements LLMPlugin {
 
             // Usage stats in the final chunk
             if (parsed.usage) {
-              yield {
-                type: 'done',
-                usage: {
-                  promptTokens: parsed.usage.prompt_tokens,
-                  completionTokens: parsed.usage.completion_tokens,
-                },
+              lastUsage = {
+                promptTokens: parsed.usage.prompt_tokens,
+                completionTokens: parsed.usage.completion_tokens,
               };
-              return;
             }
           } catch {
             // Skip malformed JSON chunks
@@ -210,10 +272,10 @@ export class OpenRouterLLM implements LLMPlugin {
       reader.releaseLock();
     }
 
-    if (structured && lastSegmentIndex === 0 && jsonBuffer.length > 0) {
-      log.warn(`Structured response yielded no segments. Raw buffer (first 200 chars): "${jsonBuffer.slice(0, 200)}"`);
+    if (structured && !segmentsYielded && jsonBuffer.length > 0) {
+      log.warn(`LLM returned no segments. Raw JSON: "${jsonBuffer.slice(0, 300)}"`);
     }
 
-    yield { type: 'done' };
+    yield { type: 'done', ...(lastUsage ? { usage: lastUsage } : {}) };
   }
 }

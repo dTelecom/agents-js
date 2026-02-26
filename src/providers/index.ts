@@ -9,3 +9,9 @@ export type { CartesiaTTSOptions } from './cartesia-tts';
 
 export { DeepgramTTS } from './deepgram-tts';
 export type { DeepgramTTSOptions } from './deepgram-tts';
+
+export { DtelecomSTT } from './dtelecom-stt';
+export type { DtelecomSTTOptions } from './dtelecom-stt';
+
+export { DtelecomTTS } from './dtelecom-tts';
+export type { DtelecomTTSOptions, VoiceConfig as DtelecomVoiceConfig } from './dtelecom-tts';
