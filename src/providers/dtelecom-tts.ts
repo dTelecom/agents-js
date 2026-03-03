@@ -29,8 +29,10 @@ export interface VoiceConfig {
 }
 
 export interface DtelecomTTSOptions {
-  /** WebSocket server URL, e.g. "ws://192.168.1.100:8766" */
+  /** Server base URL, e.g. "https://tts-xxx.dtel.network" */
   serverUrl: string;
+  /** JWT session key from x402 gateway */
+  sessionKey: string;
   /** Voice config per language: { en: { voice: "af_heart", langCode: "a" }, es: { voice: "bf_emma", langCode: "b" } } */
   voices: Record<string, VoiceConfig>;
   /** Default language code (default: "en") */
@@ -50,6 +52,7 @@ interface FlushState {
 
 export class DtelecomTTS implements TTSPlugin {
   private readonly serverUrl: string;
+  private readonly sessionKey: string;
   private readonly voices: Record<string, VoiceConfig>;
   private readonly defaultLang: string;
   private readonly speed: number;
@@ -67,11 +70,15 @@ export class DtelecomTTS implements TTSPlugin {
     if (!options.serverUrl) {
       throw new Error('DtelecomTTS requires a serverUrl');
     }
+    if (!options.sessionKey) {
+      throw new Error('DtelecomTTS requires a sessionKey');
+    }
     if (!options.voices || Object.keys(options.voices).length === 0) {
       throw new Error('DtelecomTTS requires at least one voice config');
     }
 
     this.serverUrl = options.serverUrl;
+    this.sessionKey = options.sessionKey;
     this.voices = { ...options.voices };
     this.defaultLang = options.defaultLanguage ?? Object.keys(this.voices)[0];
     this.speed = options.speed ?? 1.0;
@@ -226,25 +233,31 @@ export class DtelecomTTS implements TTSPlugin {
     if (this.connectPromise) return this.connectPromise;
 
     this.connectPromise = new Promise<void>((resolve, reject) => {
-      log.debug(`Connecting to dTelecom TTS: ${this.serverUrl}`);
+      // Use /v1/stream auth path, convert https:// to wss://
+      const url = this.serverUrl.replace(/\/$/, '') + '/v1/stream';
+      const wsUrl = url.replace('https://', 'wss://').replace('http://', 'ws://');
 
-      const ws = new WebSocket(this.serverUrl);
+      log.debug(`Connecting to dTelecom TTS: ${wsUrl}`);
+
+      const ws = new WebSocket(wsUrl);
 
       ws.on('open', () => {
         this.ws = ws;
         this.connectPromise = null;
 
-        // Send initial config with default voice
+        // Send initial config with session_key and default voice
         const defaultVoice = this.voices[this.defaultLang];
+        const msg: Record<string, unknown> = {
+          session_key: this.sessionKey,
+        };
         if (defaultVoice) {
-          ws.send(JSON.stringify({
-            config: {
-              voice: defaultVoice.voice,
-              lang_code: defaultVoice.langCode,
-              speed: this.speed,
-            },
-          }));
+          msg.config = {
+            voice: defaultVoice.voice,
+            lang_code: defaultVoice.langCode,
+            speed: this.speed,
+          };
         }
+        ws.send(JSON.stringify(msg));
 
         log.info('dTelecom TTS WebSocket connected');
         resolve();

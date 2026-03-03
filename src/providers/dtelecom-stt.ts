@@ -22,8 +22,10 @@ const log = createLogger('DtelecomSTT');
 const KEEPALIVE_INTERVAL_MS = 5_000;
 
 export interface DtelecomSTTOptions {
-  /** WebSocket server URL, e.g. "ws://192.168.1.100:8765" */
+  /** Server base URL, e.g. "https://stt-xxx.dtel.network" */
   serverUrl: string;
+  /** JWT session key from x402 gateway */
+  sessionKey: string;
   /** Initial language (default: "auto" for Parakeet auto-detect) */
   language?: string;
   /** Force Whisper model even if Parakeet supports the language */
@@ -37,6 +39,9 @@ export class DtelecomSTT implements STTPlugin {
     if (!options.serverUrl) {
       throw new Error('DtelecomSTT requires a serverUrl');
     }
+    if (!options.sessionKey) {
+      throw new Error('DtelecomSTT requires a sessionKey');
+    }
     this.options = options;
   }
 
@@ -49,6 +54,7 @@ export class DtelecomSTT implements STTPlugin {
 class DtelecomSTTStream extends BaseSTTStream {
   private ws: WebSocket | null = null;
   private readonly serverUrl: string;
+  private readonly sessionKey: string;
   private readonly forceWhisper: boolean;
   private _ready = false;
   private _closed = false;
@@ -59,6 +65,7 @@ class DtelecomSTTStream extends BaseSTTStream {
   constructor(options: DtelecomSTTOptions, language: string) {
     super();
     this.serverUrl = options.serverUrl;
+    this.sessionKey = options.sessionKey;
     this.language = language;
     this.forceWhisper = options.forceWhisper ?? false;
     this.connect();
@@ -112,15 +119,23 @@ class DtelecomSTTStream extends BaseSTTStream {
   }
 
   private connect(): void {
-    log.debug(`Connecting to dTelecom STT: ${this.serverUrl}`);
+    // Use /v1/stream auth path, convert https:// to wss://
+    const url = this.serverUrl.replace(/\/$/, '') + '/v1/stream';
+    const wsUrl = url.replace('https://', 'wss://').replace('http://', 'ws://');
 
-    this.ws = new WebSocket(this.serverUrl);
+    log.debug(`Connecting to dTelecom STT: ${wsUrl}`);
+
+    this.ws = new WebSocket(wsUrl);
 
     this.ws.on('open', () => {
       log.info('dTelecom STT WebSocket connected');
 
-      // Send initial config
-      const config: Record<string, string> = { type: 'config', language: this.language };
+      // Send initial config with session_key
+      const config: Record<string, string> = {
+        type: 'config',
+        language: this.language,
+        session_key: this.sessionKey,
+      };
       if (this.forceWhisper) {
         config.model = 'whisper';
       }

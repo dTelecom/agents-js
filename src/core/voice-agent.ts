@@ -95,6 +95,8 @@ export class VoiceAgent extends EventEmitter {
       room: options.room,
       apiKey: options.apiKey,
       apiSecret: options.apiSecret,
+      token: options.token,
+      wsUrl: options.wsUrl,
       identity: options.identity ?? 'agent',
       name: options.name ?? options.identity ?? 'AI Agent',
     });

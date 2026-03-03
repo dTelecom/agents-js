@@ -102,10 +102,16 @@ export interface AgentConfig {
 
 export interface AgentStartOptions {
   room: string;
-  apiKey: string;
-  apiSecret: string;
   identity?: string;
   name?: string;
+
+  // Mode 1: Generate token from credentials (existing)
+  apiKey?: string;
+  apiSecret?: string;
+
+  // Mode 2: Use pre-signed token from x402 gateway
+  token?: string;
+  wsUrl?: string;
 }
 
 // ─── Data Channel ────────────────────────────────────────────────────────────

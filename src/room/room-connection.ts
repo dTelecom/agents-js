@@ -5,10 +5,16 @@ const log = createLogger('RoomConnection');
 
 export interface RoomConnectionOptions {
   room: string;
-  apiKey: string;
-  apiSecret: string;
   identity?: string;
   name?: string;
+
+  // Mode 1: Generate token from credentials (existing)
+  apiKey?: string;
+  apiSecret?: string;
+
+  // Mode 2: Use pre-signed token from x402 gateway
+  token?: string;
+  wsUrl?: string;
 }
 
 export class RoomConnection {
@@ -34,29 +40,38 @@ export class RoomConnection {
    * 4. Publish an audio track for the agent to speak through
    */
   async connect(options: RoomConnectionOptions): Promise<void> {
-    const { room: roomName, apiKey, apiSecret, identity = 'agent', name } = options;
+    const { room: roomName, identity = 'agent', name } = options;
 
     log.info(`Connecting to room "${roomName}" as "${identity}"...`);
 
-    // Dynamic import to avoid bundling server-sdk-js in the main chunk
-    const { AccessToken } = await import('@dtelecom/server-sdk-js');
+    let jwt: string;
+    let wsUrl: string;
 
-    // Create token
-    const token = new AccessToken(apiKey, apiSecret, {
-      identity,
-      name: name ?? identity,
-    });
-    token.addGrant({
-      roomJoin: true,
-      room: roomName,
-      canPublish: true,
-      canSubscribe: true,
-      canPublishData: true,
-    });
+    if (options.token && options.wsUrl) {
+      // Mode 2: Use pre-signed token from x402 gateway
+      jwt = options.token;
+      wsUrl = options.wsUrl;
+    } else if (options.apiKey && options.apiSecret) {
+      // Mode 1: Generate token from credentials
+      const { AccessToken } = await import('@dtelecom/server-sdk-js');
 
-    // Discover SFU
-    const wsUrl = await token.getWsUrl();
-    const jwt = token.toJwt();
+      const token = new AccessToken(options.apiKey, options.apiSecret, {
+        identity,
+        name: name ?? identity,
+      });
+      token.addGrant({
+        roomJoin: true,
+        room: roomName,
+        canPublish: true,
+        canSubscribe: true,
+        canPublishData: true,
+      });
+
+      wsUrl = await token.getWsUrl();
+      jwt = token.toJwt();
+    } else {
+      throw new Error('Either (apiKey + apiSecret) or (token + wsUrl) must be provided');
+    }
 
     log.info(`SFU URL: ${wsUrl}`);
 
