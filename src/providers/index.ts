@@ -4,6 +4,9 @@ export type { DeepgramSTTOptions } from './deepgram-stt';
 export { OpenRouterLLM } from './openrouter-llm';
 export type { OpenRouterLLMOptions } from './openrouter-llm';
 
+export { OpenAILLM } from './openai-llm';
+export type { OpenAILLMOptions } from './openai-llm';
+
 export { CartesiaTTS } from './cartesia-tts';
 export type { CartesiaTTSOptions } from './cartesia-tts';
 
