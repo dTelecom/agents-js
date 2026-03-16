@@ -60,9 +60,9 @@ export class DtelecomTTS implements TTSPlugin {
   private ws: WebSocket | null = null;
   private connectPromise: Promise<void> | null = null;
   private flushState: FlushState | null = null;
-  /** Resolves when the current WS conversation receives "done"/"cleared". */
-  private _wsDone: Promise<void> = Promise.resolve();
-  private _resolveWsDone?: () => void;
+
+  /** Single WebSocket — pipeline must not prefetch TTS concurrently. */
+  readonly sequential = true;
 
   /** Default language code for untagged text (e.g. 'en'). */
   get defaultLanguage(): string {
@@ -164,21 +164,19 @@ export class DtelecomTTS implements TTSPlugin {
   ): AsyncGenerator<Buffer> {
     if (signal?.aborted) return;
 
-    // Wait for previous WS conversation to finish ("done"/"cleared" received).
-    // This lets pipeline prefetch start TTS for the next sentence as soon as
-    // the current one finishes generating — while audio is still playing.
-    await this._wsDone;
-    if (signal?.aborted) return;
-
-    // Set up new _wsDone for this conversation
-    this._wsDone = new Promise((r) => { this._resolveWsDone = r; });
-
     await this.ensureConnection();
 
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      this._resolveWsDone?.();
       throw new Error('dTelecom TTS WebSocket not connected');
+    }
+
+    // Cancel any stale in-flight generation
+    if (this.flushState) {
+      this.flushState.done = true;
+      this.flushState.wake?.();
+      ws.send(JSON.stringify({ type: 'clear' }));
+      this.flushState = null;
     }
 
     const state: FlushState = { chunks: [], done: false, cleared: false, error: null, wake: null };
@@ -234,10 +232,7 @@ export class DtelecomTTS implements TTSPlugin {
       }
     } finally {
       signal?.removeEventListener('abort', onAbort);
-      // Only clear flushState if it hasn't been replaced by the next synthesis
-      if (this.flushState === state) {
-        this.flushState = null;
-      }
+      this.flushState = null;
     }
   }
 
@@ -297,12 +292,10 @@ export class DtelecomTTS implements TTSPlugin {
             if (msg.type === 'done') {
               state.done = true;
               state.wake?.();
-              this._resolveWsDone?.();
             } else if (msg.type === 'cleared') {
               state.cleared = true;
               state.done = true;
               state.wake?.();
-              this._resolveWsDone?.();
             } else if (msg.type === 'generating') {
               log.debug(`TTS generating: "${(msg.text as string)?.slice(0, 40)}"`);
             } else if (msg.type === 'error') {
@@ -327,7 +320,6 @@ export class DtelecomTTS implements TTSPlugin {
         }
         this.ws = null;
         this.connectPromise = null;
-        this._resolveWsDone?.();
         reject(error);
       });
 
@@ -335,7 +327,6 @@ export class DtelecomTTS implements TTSPlugin {
         log.debug(`dTelecom TTS WebSocket closed: ${code} ${reason.toString()}`);
         this.ws = null;
         this.connectPromise = null;
-        this._resolveWsDone?.();
         const state = this.flushState;
         if (state) {
           state.done = true;
