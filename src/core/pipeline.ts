@@ -513,19 +513,18 @@ export class Pipeline extends EventEmitter {
               continue;
             }
 
-            // Pre-fetch next sentence TTS while current one plays
-            // Skip prefetch for sequential TTS providers (single WebSocket)
-            const canPrefetch = this.tts && !this.tts.sequential;
+            // Pre-fetch next sentence TTS while current one plays.
+            // Only called on first audio (not before synthesizeAndPlay) so the
+            // current sentence's TTS acquires the WS lock first.
             const tryPrefetch = () => {
-              if (state.prefetched || !canPrefetch) return;
+              if (state.prefetched || !this.tts) return;
               if (sentenceQueue.length > 0) {
                 const next = sentenceQueue.shift()!;
                 if (/\w/.test(next)) {
-                  state.prefetched = { sentence: next, streamFn: prefetchTTS(this.tts!, next, signal) };
+                  state.prefetched = { sentence: next, streamFn: prefetchTTS(this.tts, next, signal) };
                 }
               }
             };
-            tryPrefetch();
 
             try {
               await this.synthesizeAndPlay(sentence, signal, (t) => {

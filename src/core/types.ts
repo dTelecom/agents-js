@@ -81,8 +81,6 @@ export interface TTSPlugin {
   defaultLanguage?: string;
   /** Close all underlying connections (WebSockets, etc.) to allow clean process exit. */
   close?(): void;
-  /** When true, pipeline will not prefetch next sentence TTS (single-connection providers). */
-  sequential?: boolean;
 }
 
 // ─── Memory Config ───────────────────────────────────────────────────────────
