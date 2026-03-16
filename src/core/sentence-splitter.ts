@@ -9,7 +9,7 @@
  */
 
 const MIN_CHUNK = 20;
-const MAX_CHUNK = 150;
+const MAX_CHUNK = 250;
 
 export class SentenceSplitter {
   private buffer = '';

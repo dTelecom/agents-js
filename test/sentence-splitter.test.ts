@@ -31,20 +31,29 @@ describe('SentenceSplitter', () => {
 
   it('splits at clause boundary when buffer exceeds MAX_CHUNK', () => {
     const s = new SentenceSplitter();
-    // Create a string > 150 chars with a comma after position 20
-    const longText = 'A'.repeat(30) + ', ' + 'B'.repeat(130);
+    // Create a string > 250 chars with a comma after position 20
+    const longText = 'A'.repeat(30) + ', ' + 'B'.repeat(230);
     const chunks = s.push(longText);
     expect(chunks.length).toBeGreaterThan(0);
     // Should split at the comma
     expect(chunks[0]).toMatch(/,$/);
   });
 
+  it('does NOT split at clause boundary when buffer is under MAX_CHUNK', () => {
+    const s = new SentenceSplitter();
+    // 160 chars with comma — under MAX_CHUNK (250), should NOT split
+    const text = 'dTelecom is a decentralized real-time communication platform designed to provide voice, video, chat, and livestreaming capabilities.';
+    const chunks = s.push(text + ' ');
+    // Should split at the sentence-ending period, not at commas
+    expect(chunks).toEqual([text]);
+  });
+
   it('forces word boundary split when no punctuation and buffer exceeds MAX_CHUNK', () => {
     const s = new SentenceSplitter();
-    // 160 chars of words with spaces but no punctuation
+    // 260 chars of words with spaces but no punctuation
     const words = [];
     let len = 0;
-    while (len < 160) {
+    while (len < 260) {
       const word = 'word';
       words.push(word);
       len += word.length + 1;
@@ -52,9 +61,9 @@ describe('SentenceSplitter', () => {
     const longText = words.join(' ');
     const chunks = s.push(longText);
     expect(chunks.length).toBeGreaterThan(0);
-    // Each chunk should be <= 150 chars
+    // Each chunk should be <= 250 chars
     for (const chunk of chunks) {
-      expect(chunk.length).toBeLessThanOrEqual(150);
+      expect(chunk.length).toBeLessThanOrEqual(250);
     }
   });
 
