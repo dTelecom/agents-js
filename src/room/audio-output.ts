@@ -21,12 +21,21 @@ export class AudioOutput {
   private _stopped = false;
   private silenceInterval: ReturnType<typeof setInterval> | null = null;
 
+  /** Resolves when the RTP transport is ready and initial silence has been sent. */
+  readonly whenReady: Promise<void>;
+  private _resolveReady?: () => void;
+
   /** When set, raw PCM from TTS is saved to this directory as WAV files for debugging. */
   dumpDir: string | null = null;
   private dumpCounter = 0;
 
   constructor(source: AudioSource) {
     this.source = source;
+    if (source.ready) {
+      this.whenReady = Promise.resolve();
+    } else {
+      this.whenReady = new Promise((resolve) => { this._resolveReady = resolve; });
+    }
   }
 
   get playing(): boolean {
@@ -59,11 +68,14 @@ export class AudioOutput {
     if (this.silenceInterval) return;
 
     const startKeepalive = () => {
-      log.debug('Transport ready — sending initial silence + starting 3s keepalive');
+      log.debug('Transport ready — sending initial silence burst + starting 3s keepalive');
 
-      // Send one silence frame immediately so the SFU starts forwarding the
-      // track right away — clients get TrackSubscribed without delay.
-      this.sendSilenceFrame();
+      // Send 300ms of silence so the SFU starts forwarding the track and
+      // the client's jitter buffer is primed before real speech arrives.
+      for (let i = 0; i < 15; i++) {
+        this.sendSilenceFrame();
+      }
+      this._resolveReady?.();
 
       this.silenceInterval = setInterval(() => {
         if (!this._playing && !this._responding && !this._stopped) {

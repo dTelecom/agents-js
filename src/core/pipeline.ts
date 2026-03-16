@@ -161,12 +161,14 @@ export class Pipeline extends EventEmitter {
     this._llmWarmupPromise = this.llm.warmup
       ? this.llm.warmup(options.instructions).catch((err: unknown) => { log.warn('LLM warmup failed (non-fatal):', err); })
       : Promise.resolve();
-    this._warmupPromise = Promise.all([this._ttsWarmupPromise, this._llmWarmupPromise]).then(() => {});
+    this._audioReadyPromise = this.audioOutput.whenReady;
+    this._warmupPromise = Promise.all([this._ttsWarmupPromise, this._llmWarmupPromise, this._audioReadyPromise]).then(() => {});
   }
 
   private readonly _warmupPromise: Promise<void>;
   private readonly _ttsWarmupPromise: Promise<void>;
   private readonly _llmWarmupPromise: Promise<void>;
+  private readonly _audioReadyPromise: Promise<void>;
 
   get processing(): boolean {
     return this._processing;
@@ -376,6 +378,8 @@ export class Pipeline extends EventEmitter {
       // ── Producer: consume LLM stream, split into sentences ──
       const MAX_LLM_RETRIES = 2;
 
+      let toolCallEmitted = false;
+
       const producer = async () => {
         const defaultLang = this.tts?.defaultLanguage;
 
@@ -445,6 +449,7 @@ export class Pipeline extends EventEmitter {
                 }
               } else if (chunk.type === 'tool_call' && chunk.toolCall) {
                 log.info(`Tool call: ${chunk.toolCall.name}(${chunk.toolCall.arguments})`);
+                toolCallEmitted = true;
                 this.emit('toolCall', chunk.toolCall);
               }
             }
@@ -460,8 +465,8 @@ export class Pipeline extends EventEmitter {
               pushSentence(remaining);
             }
 
-            if (fullResponse.trim()) {
-              break; // Got output — done
+            if (fullResponse.trim() || toolCallEmitted) {
+              break; // Got output or tool call — done
             }
 
             log.warn(`LLM produced no output (attempt ${attempt + 1}/${MAX_LLM_RETRIES + 1})`);
@@ -606,7 +611,7 @@ export class Pipeline extends EventEmitter {
     }
 
     this._processing = true;
-    await this._ttsWarmupPromise;
+    await Promise.all([this._ttsWarmupPromise, this._audioReadyPromise]);
     log.info(`say(): "${text.slice(0, 60)}"`);
 
     try {

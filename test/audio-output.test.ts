@@ -348,13 +348,13 @@ describe('AudioOutput', () => {
       await vi.advanceTimersByTimeAsync(5000);
       expect(source.frames).toHaveLength(0);
 
-      // Transport becomes ready — immediate frame + keepalive starts
+      // Transport becomes ready — initial silence burst (15 frames = 300ms) + keepalive starts
       source.makeReady();
-      expect(source.frames).toHaveLength(1);
+      expect(source.frames).toHaveLength(15);
       expect(source.frames[0].samples.every((s) => s === 0)).toBe(true);
 
       await vi.advanceTimersByTimeAsync(4000);
-      expect(source.frames.length).toBeGreaterThan(1);
+      expect(source.frames.length).toBeGreaterThan(15);
     });
 
     it('does not double-start silence interval', () => {
