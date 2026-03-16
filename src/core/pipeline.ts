@@ -514,12 +514,14 @@ export class Pipeline extends EventEmitter {
             }
 
             // Pre-fetch next sentence TTS while current one plays
+            // Skip prefetch for sequential TTS providers (single WebSocket)
+            const canPrefetch = this.tts && !this.tts.sequential;
             const tryPrefetch = () => {
-              if (state.prefetched || !this.tts) return;
+              if (state.prefetched || !canPrefetch) return;
               if (sentenceQueue.length > 0) {
                 const next = sentenceQueue.shift()!;
                 if (/\w/.test(next)) {
-                  state.prefetched = { sentence: next, streamFn: prefetchTTS(this.tts, next, signal) };
+                  state.prefetched = { sentence: next, streamFn: prefetchTTS(this.tts!, next, signal) };
                 }
               }
             };
