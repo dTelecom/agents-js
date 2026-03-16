@@ -33,17 +33,34 @@ export interface Message {
   content: string;
 }
 
+export interface ToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+export interface ToolCallResult {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
 export interface LLMChunk {
   type: 'token' | 'segment' | 'tool_call' | 'done';
   token?: string;
   segment?: { lang: string; text: string };
-  toolCall?: { name: string; arguments: string };
+  toolCall?: ToolCallResult;
   usage?: { promptTokens: number; completionTokens: number };
 }
 
 export interface LLMChatOptions {
   /** Skip structured output (responseFormat) for this call — return plain text tokens. */
   plainText?: boolean;
+  /** Tool definitions to pass to the LLM for function calling. */
+  tools?: ToolDefinition[];
 }
 
 export interface LLMPlugin {
@@ -98,6 +115,8 @@ export interface AgentConfig {
   memory?: MemoryConfig;
   /** Max context tokens before triggering summarization (default: 5000) */
   maxContextTokens?: number;
+  /** Tool definitions for LLM function calling. */
+  tools?: ToolDefinition[];
 }
 
 export interface AgentStartOptions {
@@ -147,6 +166,8 @@ export interface PipelineOptions {
   memory?: import('../memory/room-memory').RoomMemory;
   /** Max context tokens before triggering summarization (default: 5000) */
   maxContextTokens?: number;
+  /** Tool definitions for LLM function calling. */
+  tools?: ToolDefinition[];
 }
 
 // ─── Events ──────────────────────────────────────────────────────────────────
@@ -161,6 +182,8 @@ export interface AgentEvents {
   response: (text: string) => void;
   /** Agent state: idle → listening (STT active) → thinking (LLM) → speaking (audio) → idle. */
   agentState: (state: AgentState) => void;
+  /** Emitted when the LLM invokes a tool. */
+  toolCall: (toolCall: ToolCallResult) => void;
   error: (error: Error) => void;
   connected: () => void;
   disconnected: (reason?: string) => void;
@@ -171,5 +194,7 @@ export interface PipelineEvents {
   sentence: (text: string) => void;
   response: (text: string) => void;
   agentState: (state: AgentState) => void;
+  /** Emitted when the LLM invokes a tool. */
+  toolCall: (toolCall: ToolCallResult) => void;
   error: (error: Error) => void;
 }

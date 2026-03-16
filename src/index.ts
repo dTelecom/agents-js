@@ -51,6 +51,8 @@ export type {
   LLMChunk,
   LLMChatOptions,
   Message,
+  ToolDefinition,
+  ToolCallResult,
   TTSPlugin,
   RespondMode,
   AgentConfig,

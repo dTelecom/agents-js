@@ -106,6 +106,9 @@ export class OpenRouterLLM implements LLMPlugin {
       prov.require_parameters = true;
       body.provider = prov;
     }
+    if (options?.tools?.length) {
+      body.tools = options.tools;
+    }
 
     log.debug(`LLM request: model=${this.model}, messages=${messages.length}`);
 
@@ -140,6 +143,7 @@ export class OpenRouterLLM implements LLMPlugin {
     let jsonBuffer = '';
     let segmentsYielded = false;
     let lastUsage: { promptTokens: number; completionTokens: number } | undefined;
+    const pendingToolCalls = new Map<number, { id: string; name: string; arguments: string }>();
 
     // Streaming segment extraction state
     let inSegmentsArray = false;  // true after we see "segments" : [
@@ -256,6 +260,21 @@ export class OpenRouterLLM implements LLMPlugin {
               }
             }
 
+            if (delta?.tool_calls) {
+              for (const tc of delta.tool_calls as Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }>) {
+                const idx = tc.index;
+                if (tc.id) {
+                  pendingToolCalls.set(idx, { id: tc.id, name: tc.function?.name ?? '', arguments: tc.function?.arguments ?? '' });
+                } else {
+                  const existing = pendingToolCalls.get(idx);
+                  if (existing) {
+                    if (tc.function?.name) existing.name += tc.function.name;
+                    if (tc.function?.arguments) existing.arguments += tc.function.arguments;
+                  }
+                }
+              }
+            }
+
             // Usage stats in the final chunk
             if (parsed.usage) {
               lastUsage = {
@@ -274,6 +293,10 @@ export class OpenRouterLLM implements LLMPlugin {
 
     if (structured && !segmentsYielded && jsonBuffer.length > 0) {
       log.warn(`LLM returned no segments. Raw JSON: "${jsonBuffer.slice(0, 300)}"`);
+    }
+
+    for (const [, tc] of pendingToolCalls) {
+      yield { type: 'tool_call', toolCall: tc };
     }
 
     yield { type: 'done', ...(lastUsage ? { usage: lastUsage } : {}) };

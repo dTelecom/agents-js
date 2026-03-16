@@ -20,6 +20,7 @@ import type {
   PipelineOptions,
   PipelineEvents,
   AgentState,
+  ToolDefinition,
 } from './types';
 import { ContextManager } from './context-manager';
 import { SentenceSplitter } from './sentence-splitter';
@@ -107,6 +108,7 @@ export class Pipeline extends EventEmitter {
   private readonly nameVariants: string[];
   private readonly beforeRespond?: (speaker: string, text: string) => boolean | Promise<boolean>;
   private readonly memory?: RoomMemory;
+  private readonly tools?: ToolDefinition[];
 
   /** Strip provider-specific markup (e.g. SSML lang tags) for display. */
   private cleanText(text: string): string {
@@ -133,6 +135,7 @@ export class Pipeline extends EventEmitter {
     this.nameVariants = (options.nameVariants ?? []).map((n) => n.toLowerCase());
     this.beforeRespond = options.beforeRespond;
     this.memory = options.memory;
+    this.tools = options.tools;
     this.context = new ContextManager({
       instructions: options.instructions,
       maxContextTokens: options.maxContextTokens,
@@ -401,7 +404,7 @@ export class Pipeline extends EventEmitter {
             pushSentence(combined);
           };
 
-          const llmStream = this.llm.chat(messages, signal);
+          const llmStream = this.llm.chat(messages, signal, { tools: this.tools });
           try {
             while (!signal.aborted) {
               const { value: chunk, done } = await llmStream.next();
@@ -440,6 +443,9 @@ export class Pipeline extends EventEmitter {
                 for (const sentence of sentences) {
                   pushSentence(sentence);
                 }
+              } else if (chunk.type === 'tool_call' && chunk.toolCall) {
+                log.info(`Tool call: ${chunk.toolCall.name}(${chunk.toolCall.arguments})`);
+                this.emit('toolCall', chunk.toolCall);
               }
             }
           } finally {
@@ -514,14 +520,21 @@ export class Pipeline extends EventEmitter {
             };
             tryPrefetch();
 
-            await this.synthesizeAndPlay(sentence, signal, (t) => {
-              if (!tFirstAudioPlayed) {
-                tFirstAudioPlayed = t;
-                this.setAgentState('speaking');
-              }
-              this.emit('sentence', this.cleanText(sentence), sentence);
-              tryPrefetch(); // also try when first audio arrives (more sentences may be ready)
-            }, existingStream);
+            try {
+              await this.synthesizeAndPlay(sentence, signal, (t) => {
+                if (!tFirstAudioPlayed) {
+                  tFirstAudioPlayed = t;
+                  this.setAgentState('speaking');
+                }
+                this.emit('sentence', this.cleanText(sentence), sentence);
+                tryPrefetch(); // also try when first audio arrives (more sentences may be ready)
+              }, existingStream);
+            } catch (ttsErr: unknown) {
+              // TTS error on a prefetched sentence should not kill the turn —
+              // previous sentences already played successfully.
+              if (ttsErr instanceof Error && ttsErr.name === 'AbortError') throw ttsErr;
+              log.warn(`TTS error for sentence (skipping): "${sentence.slice(0, 40)}"`, ttsErr);
+            }
           }
         } finally {
           if (!signal.aborted) {

@@ -119,6 +119,7 @@ export class VoiceAgent extends EventEmitter {
       nameVariants: this.config.nameVariants,
       memory: this.memory ?? undefined,
       maxContextTokens: this.config.maxContextTokens,
+      tools: this.config.tools,
     });
 
     // Forward pipeline events
@@ -126,6 +127,7 @@ export class VoiceAgent extends EventEmitter {
     this.pipeline.on('sentence', (text, raw) => this.emit('sentence', text, raw));
     this.pipeline.on('response', (text) => this.emit('response', text));
     this.pipeline.on('agentState', (state) => this.emit('agentState', state));
+    this.pipeline.on('toolCall', (tc) => this.emit('toolCall', tc));
     this.pipeline.on('error', (error) => this.emit('error', error));
 
     // 5. Subscribe to existing remote participants
