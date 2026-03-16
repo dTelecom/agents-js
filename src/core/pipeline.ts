@@ -43,6 +43,56 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Start TTS synthesis in the background, buffering chunks as they arrive.
+ * Returns a factory that produces an async generator yielding the buffered chunks.
+ * This allows the next sentence's TTS to run while the current sentence plays.
+ */
+function prefetchTTS(
+  tts: TTSPlugin,
+  text: string,
+  signal?: AbortSignal,
+): () => AsyncGenerator<Buffer> {
+  const buffer: Buffer[] = [];
+  let done = false;
+  let error: unknown = null;
+  let wake: (() => void) | null = null;
+
+  const notify = () => { if (wake) { const w = wake; wake = null; w(); } };
+
+  // Fire-and-forget: consume TTS into buffer immediately
+  void (async () => {
+    try {
+      const stream = tts.synthesize(text, signal);
+      for await (const chunk of stream) {
+        if (signal?.aborted) break;
+        buffer.push(chunk);
+        notify();
+      }
+    } catch (e: unknown) {
+      if (!(e instanceof Error && e.name === 'AbortError')) error = e;
+    } finally {
+      done = true;
+      notify();
+    }
+  })();
+
+  // Return factory for async generator that drains the buffer
+  return async function* () {
+    let index = 0;
+    while (true) {
+      if (signal?.aborted) return;
+      if (error) throw error;
+      if (index < buffer.length) {
+        yield buffer[index++];
+        continue;
+      }
+      if (done) return;
+      await new Promise<void>((r) => { wake = r; });
+    }
+  };
+}
+
 export class Pipeline extends EventEmitter {
   private readonly stt: STTPlugin;
   private readonly llm: LLMPlugin;
@@ -101,31 +151,19 @@ export class Pipeline extends EventEmitter {
       this.setAgentState('idle');
     };
 
-    // Warm up LLM/TTS in background (fire-and-forget)
-    this._warmupPromise = this.warmup(options.instructions);
+    // Warm up LLM and TTS separately so say() can start as soon as TTS is ready
+    this._ttsWarmupPromise = this.tts?.warmup
+      ? this.tts.warmup().catch((err: unknown) => { log.warn('TTS warmup failed (non-fatal):', err); })
+      : Promise.resolve();
+    this._llmWarmupPromise = this.llm.warmup
+      ? this.llm.warmup(options.instructions).catch((err: unknown) => { log.warn('LLM warmup failed (non-fatal):', err); })
+      : Promise.resolve();
+    this._warmupPromise = Promise.all([this._ttsWarmupPromise, this._llmWarmupPromise]).then(() => {});
   }
 
-  /** One-shot warmup — safe to call from constructor, resolves when both LLM and TTS are ready. */
-  private _warmupPromise: Promise<void>;
-
-  private async warmup(instructions: string): Promise<void> {
-    const tasks: Promise<void>[] = [];
-    if (this.llm.warmup) {
-      tasks.push(
-        this.llm.warmup(instructions).catch((err: unknown) => {
-          log.warn('LLM warmup failed:', err);
-        }),
-      );
-    }
-    if (this.tts?.warmup) {
-      tasks.push(
-        this.tts.warmup().catch((err: unknown) => {
-          log.warn('TTS warmup failed:', err);
-        }),
-      );
-    }
-    await Promise.all(tasks);
-  }
+  private readonly _warmupPromise: Promise<void>;
+  private readonly _ttsWarmupPromise: Promise<void>;
+  private readonly _llmWarmupPromise: Promise<void>;
 
   get processing(): boolean {
     return this._processing;
@@ -431,36 +469,59 @@ export class Pipeline extends EventEmitter {
       // ── Consumer: synthesize sentences and play audio ──
       // beginResponse/endResponse suppresses silence injection between
       // sentences so partial frames in AudioSource don't get corrupted.
+      // Pre-fetches TTS for the next sentence while current one plays.
       const consumer = async () => {
         this.audioOutput.beginResponse();
+        type Prefetched = { sentence: string; streamFn: () => AsyncGenerator<Buffer> };
+        const state: { prefetched: Prefetched | null } = { prefetched: null };
         try {
           while (true) {
             if (signal.aborted) break;
 
-            if (sentenceQueue.length > 0) {
-              const sentence = sentenceQueue.shift()!;
-              // Skip sentences with no word characters (e.g. stray quotes/punctuation)
+            let sentence: string;
+            let existingStream: AsyncGenerator<Buffer> | undefined;
+
+            if (state.prefetched) {
+              sentence = state.prefetched.sentence;
+              existingStream = state.prefetched.streamFn();
+              state.prefetched = null;
+            } else if (sentenceQueue.length > 0) {
+              sentence = sentenceQueue.shift()!;
               if (!/\w/.test(sentence)) {
                 log.debug(`Skipping non-word sentence: "${sentence}"`);
                 continue;
               }
-              await this.synthesizeAndPlay(sentence, signal, (t) => {
-                if (!tFirstAudioPlayed) {
-                  tFirstAudioPlayed = t;
-                  this.setAgentState('speaking');
-                }
-                this.emit('sentence', this.cleanText(sentence), sentence);
+              existingStream = undefined;
+            } else if (producerDone) {
+              break;
+            } else {
+              await new Promise<void>((resolve) => {
+                wakeConsumer = resolve;
               });
+              wakeConsumer = null;
               continue;
             }
 
-            if (producerDone) break;
+            // Pre-fetch next sentence TTS while current one plays
+            const tryPrefetch = () => {
+              if (state.prefetched || !this.tts) return;
+              if (sentenceQueue.length > 0) {
+                const next = sentenceQueue.shift()!;
+                if (/\w/.test(next)) {
+                  state.prefetched = { sentence: next, streamFn: prefetchTTS(this.tts, next, signal) };
+                }
+              }
+            };
+            tryPrefetch();
 
-            // Wait for producer to push a sentence
-            await new Promise<void>((resolve) => {
-              wakeConsumer = resolve;
-            });
-            wakeConsumer = null;
+            await this.synthesizeAndPlay(sentence, signal, (t) => {
+              if (!tFirstAudioPlayed) {
+                tFirstAudioPlayed = t;
+                this.setAgentState('speaking');
+              }
+              this.emit('sentence', this.cleanText(sentence), sentence);
+              tryPrefetch(); // also try when first audio arrives (more sentences may be ready)
+            }, existingStream);
           }
         } finally {
           if (!signal.aborted) {
@@ -532,7 +593,7 @@ export class Pipeline extends EventEmitter {
     }
 
     this._processing = true;
-    await this._warmupPromise;
+    await this._ttsWarmupPromise;
     log.info(`say(): "${text.slice(0, 60)}"`);
 
     try {
@@ -580,6 +641,7 @@ export class Pipeline extends EventEmitter {
     text: string,
     signal: AbortSignal,
     onFirstAudio: (timestamp: number) => void,
+    existingStream?: AsyncGenerator<Buffer>,
   ): Promise<void> {
     if (!this.tts || signal.aborted) {
       log.info(`[Agent says]: ${text}`);
@@ -591,7 +653,7 @@ export class Pipeline extends EventEmitter {
       let firstChunk = true;
       let ttsChunkCount = 0;
 
-      const ttsStream = this.tts.synthesize(text, signal);
+      const ttsStream = existingStream ?? this.tts.synthesize(text, signal);
       const measuredStream = async function* () {
         for await (const chunk of ttsStream) {
           ttsChunkCount++;
