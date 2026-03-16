@@ -60,6 +60,8 @@ export class DtelecomTTS implements TTSPlugin {
   private ws: WebSocket | null = null;
   private connectPromise: Promise<void> | null = null;
   private flushState: FlushState | null = null;
+  /** Serializes synthesizeSegment calls so flushState is never overwritten mid-stream. */
+  private _synthLock: Promise<void> = Promise.resolve();
 
   /** Default language code for untagged text (e.g. 'en'). */
   get defaultLanguage(): string {
@@ -159,10 +161,17 @@ export class DtelecomTTS implements TTSPlugin {
     text: string,
     signal?: AbortSignal,
   ): AsyncGenerator<Buffer> {
+    // Serialize: wait for any in-flight synthesis to complete before touching flushState
+    const prevLock = this._synthLock;
+    let releaseLock!: () => void;
+    this._synthLock = new Promise((r) => { releaseLock = r; });
+    await prevLock;
+
     await this.ensureConnection();
 
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      releaseLock();
       throw new Error('dTelecom TTS WebSocket not connected');
     }
 
@@ -220,6 +229,7 @@ export class DtelecomTTS implements TTSPlugin {
     } finally {
       signal?.removeEventListener('abort', onAbort);
       this.flushState = null;
+      releaseLock();
     }
   }
 
