@@ -238,7 +238,6 @@ export class DtelecomTTS implements TTSPlugin {
       if (this.flushState === state) {
         this.flushState = null;
       }
-      this._resolveWsDone?.();
     }
   }
 
@@ -328,6 +327,7 @@ export class DtelecomTTS implements TTSPlugin {
         }
         this.ws = null;
         this.connectPromise = null;
+        this._resolveWsDone?.();
         reject(error);
       });
 
@@ -335,6 +335,7 @@ export class DtelecomTTS implements TTSPlugin {
         log.debug(`dTelecom TTS WebSocket closed: ${code} ${reason.toString()}`);
         this.ws = null;
         this.connectPromise = null;
+        this._resolveWsDone?.();
         const state = this.flushState;
         if (state) {
           state.done = true;
