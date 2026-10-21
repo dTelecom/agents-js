@@ -36,12 +36,22 @@ const log = createLogger('Pipeline');
  * Estimated latency from AudioSource.captureFrame() to the client hearing it:
  * Opus encode → RTP → SFU → client → jitter buffer → decode.
  * We delay the "speaking: false" emission by this amount so the UI status
- * matches what the user actually hears.
+ * matches what the user actually hears. This is only for completed speech:
+ * cancellation must release a queued user turn without this extra delay.
  */
 const AUDIO_DRAIN_MS = 800;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function waitForAudioDrain(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, AUDIO_DRAIN_MS);
+    signal.addEventListener('abort', finish, { once: true });
+  });
 }
 
 /**
@@ -328,6 +338,7 @@ export class Pipeline extends EventEmitter {
     let tLlmFirstToken = 0;
     let tFirstSentence = 0;
     let tFirstAudioPlayed = 0;
+    let producedAudio = false;
 
     log.info(`Processing turn from "${speaker}": ${text}`);
 
@@ -529,6 +540,7 @@ export class Pipeline extends EventEmitter {
 
             try {
               await this.synthesizeAndPlay(sentence, signal, (t) => {
+                producedAudio = true;
                 if (!tFirstAudioPlayed) {
                   tFirstAudioPlayed = t;
                   this.setAgentState('speaking');
@@ -577,9 +589,9 @@ export class Pipeline extends EventEmitter {
         this.emit('response', this.cleanText(fullResponse.trim()));
       }
 
-      // Wait for audio pipeline to drain before signaling "listening"
-      // (AudioSource → Opus → RTP → SFU → client decode)
-      await sleep(AUDIO_DRAIN_MS);
+      // Preserve the completed-speech UI delay, but never hold a new turn
+      // after cancellation or a response that produced no speech audio.
+      if (producedAudio) await waitForAudioDrain(signal);
       this.setAgentState('idle');
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') {
@@ -620,8 +632,10 @@ export class Pipeline extends EventEmitter {
       const signal = this.bargeIn.startCycle();
       this.audioOutput.beginResponse();
       this.setAgentState('thinking');
+      let producedAudio = false;
 
       await this.synthesizeAndPlay(text, signal, () => {
+        producedAudio = true;
         this.setAgentState('speaking');
         this.emit('sentence', this.cleanText(text), text);
       });
@@ -633,8 +647,7 @@ export class Pipeline extends EventEmitter {
         this.emit('response', this.cleanText(text));
       }
 
-      // Wait for audio pipeline to drain before signaling "listening"
-      await sleep(AUDIO_DRAIN_MS);
+      if (producedAudio) await waitForAudioDrain(signal);
       this.setAgentState('idle');
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') {
@@ -676,6 +689,8 @@ export class Pipeline extends EventEmitter {
       const ttsStream = existingStream ?? this.tts.synthesize(text, signal);
       const measuredStream = async function* () {
         for await (const chunk of ttsStream) {
+          if (signal.aborted) break;
+          if (chunk.byteLength === 0) continue;
           ttsChunkCount++;
           if (firstChunk) {
             firstChunk = false;

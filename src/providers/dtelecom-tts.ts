@@ -22,6 +22,7 @@ import type { TTSPlugin } from '../core/types';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('DtelecomTTS');
+const CLEAR_TIMEOUT_MS = 5000;
 
 export interface VoiceConfig {
   voice: string;
@@ -46,6 +47,7 @@ interface FlushState {
   chunks: Buffer[];
   done: boolean;
   cleared: boolean;
+  cancelled: boolean;
   error: Error | null;
   wake: (() => void) | null;
 }
@@ -107,6 +109,7 @@ export class DtelecomTTS implements TTSPlugin {
       this.ws = null;
     }
     this.connectPromise = null;
+    this.flushState?.wake?.();
     this.flushState = null;
   }
 
@@ -165,6 +168,7 @@ export class DtelecomTTS implements TTSPlugin {
     if (signal?.aborted) return;
 
     await this.ensureConnection();
+    if (signal?.aborted) return;
 
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -179,18 +183,21 @@ export class DtelecomTTS implements TTSPlugin {
       this.flushState = null;
     }
 
-    const state: FlushState = { chunks: [], done: false, cleared: false, error: null, wake: null };
+    const state: FlushState = { chunks: [], done: false, cleared: false, cancelled: false, error: null, wake: null };
     this.flushState = state;
 
     // Handle abort — send clear to cancel
     const onAbort = () => {
+      state.cancelled = true;
+      state.chunks.length = 0;
       state.done = true;
       state.wake?.();
       if (ws.readyState === WebSocket.OPEN) {
         try {
           ws.send(JSON.stringify({ type: 'clear' }));
         } catch {
-          // Ignore send errors during cancellation
+          // The stream cannot be safely reused if cancellation was not sent.
+          ws.terminate();
         }
       }
     };
@@ -232,7 +239,28 @@ export class DtelecomTTS implements TTSPlugin {
       }
     } finally {
       signal?.removeEventListener('abort', onAbort);
-      this.flushState = null;
+      // Keep the old request attached until the server confirms its clear.
+      // Otherwise its late PCM/cleared event can be assigned to the next text.
+      if (state.cancelled) await this.waitForClear(ws, state);
+      if (this.flushState === state) this.flushState = null;
+    }
+  }
+
+  private async waitForClear(ws: WebSocket, state: FlushState): Promise<void> {
+    if (state.cleared || ws.readyState !== WebSocket.OPEN) return;
+    const timeout = setTimeout(() => {
+      log.warn('TTS cancellation acknowledgement timed out; closing connection');
+      state.error = new Error('TTS cancellation acknowledgement timed out');
+      ws.terminate();
+      state.wake?.();
+    }, CLEAR_TIMEOUT_MS);
+    try {
+      while (!state.cleared && !state.error && ws.readyState === WebSocket.OPEN) {
+        await new Promise<void>((resolve) => { state.wake = resolve; });
+        state.wake = null;
+      }
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -253,9 +281,9 @@ export class DtelecomTTS implements TTSPlugin {
       log.debug(`Connecting to dTelecom TTS: ${wsUrl}`);
 
       const ws = new WebSocket(wsUrl);
+      this.ws = ws;
 
       ws.on('open', () => {
-        this.ws = ws;
         this.connectPromise = null;
 
         // Send initial config with session_key and default voice
@@ -277,10 +305,12 @@ export class DtelecomTTS implements TTSPlugin {
       });
 
       ws.on('message', (data, isBinary) => {
+        if (this.ws !== ws) return;
         const state = this.flushState;
         if (!state) return;
 
         if (isBinary) {
+          if (state.cancelled) return;
           // Binary frame = raw PCM16 48kHz audio (server resamples from Kokoro's 24kHz)
           const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
           state.chunks.push(buf);
@@ -313,24 +343,28 @@ export class DtelecomTTS implements TTSPlugin {
       ws.on('error', (err) => {
         const error = err instanceof Error ? err : new Error(String(err));
         log.error('dTelecom TTS WebSocket error:', error);
-        const state = this.flushState;
-        if (state) {
-          state.error = error;
-          state.wake?.();
+        if (this.ws === ws) {
+          const state = this.flushState;
+          if (state) {
+            state.error = error;
+            state.wake?.();
+          }
+          this.ws = null;
+          this.connectPromise = null;
         }
-        this.ws = null;
-        this.connectPromise = null;
         reject(error);
       });
 
       ws.on('close', (code, reason) => {
         log.debug(`dTelecom TTS WebSocket closed: ${code} ${reason.toString()}`);
-        this.ws = null;
-        this.connectPromise = null;
-        const state = this.flushState;
-        if (state) {
-          state.done = true;
-          state.wake?.();
+        if (this.ws === ws) {
+          this.ws = null;
+          this.connectPromise = null;
+          const state = this.flushState;
+          if (state) {
+            state.done = true;
+            state.wake?.();
+          }
         }
       });
     });

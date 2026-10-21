@@ -14,6 +14,10 @@ Participant mic -> SFU -> server-sdk-node (Opus decode) -> PCM16 16kHz
 
 The pipeline uses a producer/consumer pattern: LLM tokens are split into sentences and queued, while a consumer synthesizes and plays audio concurrently. This minimizes time-to-first-audio.
 
+After completed speech, the pipeline retains an 800 ms estimate for audio to reach the listener before changing its UI state to idle. This wait is cancellable: a new user turn releases it immediately, and an interrupted response or greeting does not add the wait after provider cleanup. Responses with no speech audio skip it entirely. Cancellation still flushes local buffered audio and waits for the active producer/consumer to finish before starting the queued turn; TTS synthesis remains sequential for providers that require it.
+
+For dTelecom TTS, cancellation sends `clear` and waits for `cleared` before reusing the WebSocket. Late audio from the cancelled request is discarded. A missing acknowledgement closes the connection after five seconds so a subsequent request reconnects; this is an error timeout, not a delay applied to successful cancellations.
+
 ## Install
 
 ```bash
