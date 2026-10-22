@@ -131,4 +131,19 @@ describe('ContextManager', () => {
       { role: 'assistant', content: 'A2' },
     ]);
   });
+
+  it('does not commit a partial summary when the provider finishes quietly after cancellation', async () => {
+    const cm = new ContextManager({ instructions, recentTurnsToKeep: 1 });
+    cm.addUserTurn('Alice', 'Earlier question');
+    cm.addAgentTurn('Earlier answer');
+    cm.addUserTurn('Alice', 'Current question');
+    const before = cm.buildMessages();
+    const controller = new AbortController();
+    await expect(cm.summarize({ async *chat(_messages, signal) {
+      expect(signal).toBe(controller.signal);
+      yield { type: 'token', token: 'Incomplete summary' };
+      controller.abort();
+    } }, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(cm.buildMessages()).toEqual(before);
+  });
 });

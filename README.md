@@ -16,6 +16,10 @@ The pipeline uses a producer/consumer pattern: LLM tokens are split into sentenc
 
 After completed speech, the pipeline retains an 800 ms estimate for audio to reach the listener before changing its UI state to idle. This wait is cancellable: a new user turn releases it immediately, and an interrupted response or greeting does not add the wait after provider cleanup. Responses with no speech audio skip it entirely. Cancellation still flushes local buffered audio and waits for the active producer/consumer to finish before starting the queued turn; TTS synthesis remains sequential for providers that require it.
 
+Cancellation covers warmup, conversation summarization, memory lookup and response generation. Cancelled summaries do not replace conversation history. A final transcript arriving during a response occupies a single pending-turn slot (the latest final replaces any earlier pending final) and interrupts the current cycle. The next cycle starts after the active provider tasks finish cancellation cleanup. An `APIUserAbortError` from an aborted cycle is expected cancellation; genuine provider failures remain errors.
+
+Latency logs separate `Queue` (final transcript received to response-cycle start), `Prepare` (warmup, summary and memory lookup), `LLM` (request to first sentence, including `TTFT`) and `TTS` (first sentence to first audio). `STT` is server-reported processing time. `Overall` includes those phases but excludes STT endpointing wait; it is unavailable for turns without a text response. These measurements are not microphone-to-speaker latency.
+
 For dTelecom TTS, cancellation sends `clear` and waits for `cleared` before reusing the WebSocket. Late audio from the cancelled request is discarded. A missing acknowledgement closes the connection after five seconds so a subsequent request reconnects; this is an error timeout, not a delay applied to successful cancellations.
 
 ## Install

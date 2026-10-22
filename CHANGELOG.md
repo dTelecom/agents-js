@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1 — 2026-10-22
+
+- Create the response cancellation signal before warmup and summarization; pass it through summary generation and discard cancelled summaries without changing conversation history.
+- Cancel warmup/memory waits and greetings safely, and prevent pending responses from starting after shutdown.
+- Wait for both LLM and audio task cleanup before starting the latest pending turn. Wake an idle audio consumer when generation fails or is cancelled.
+- Recognize `APIUserAbortError` as expected cancellation only when the response signal was aborted; keep genuine provider failures visible.
+- Store timing with each pending turn and report `Queue` and `Prepare` separately from LLM generation. `Overall` still excludes STT endpointing wait; turns without a text response report it as unavailable.
+
 ## 0.4.0 — 2026-10-22
 
 - Add independent `partials` and `smartTurn` opt-ins to DtelecomSTT; preserve final-only defaults.

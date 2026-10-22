@@ -33,17 +33,20 @@ export class BargeIn {
 
     log.info('Barge-in detected — cancelling current response');
 
-    if (this.abortController) {
-      this.abortController.abort();
-      this.abortController = null;
-    }
+    this.cancelCycle();
 
     this._onInterrupt?.();
   }
 
+  /** Cancel active work without reporting a user interruption (failure or shutdown). */
+  cancelCycle(): void {
+    this.abortController?.abort();
+    this.abortController = null;
+  }
+
   /** Reset after the interrupted cycle is cleaned up */
   reset(): void {
+    this.cancelCycle();
     this._interrupted = false;
-    this.abortController = null;
   }
 }

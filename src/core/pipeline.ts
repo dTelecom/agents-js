@@ -29,6 +29,7 @@ import { BargeIn } from './barge-in';
 import type { AudioOutput } from '../room/audio-output';
 import type { RoomMemory } from '../memory/room-memory';
 import { createLogger } from '../utils/logger';
+import { isCancellation, waitWithSignal } from '../utils/cancellation';
 
 const log = createLogger('Pipeline');
 
@@ -40,6 +41,13 @@ const log = createLogger('Pipeline');
  * cancellation must release a queued user turn without this extra delay.
  */
 const AUDIO_DRAIN_MS = 800;
+
+interface PendingTurn {
+  speaker: string;
+  text: string;
+  finalAt: number;
+  sttDuration: number;
+}
 
 function waitForAudioDrain(signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
@@ -81,7 +89,7 @@ function prefetchTTS(
         notify();
       }
     } catch (e: unknown) {
-      if (!(e instanceof Error && e.name === 'AbortError')) error = e;
+      if (!isCancellation(e, signal)) error = e;
     } finally {
       done = true;
       notify();
@@ -130,9 +138,10 @@ export class Pipeline extends EventEmitter {
 
   private _processing = false;
   private _running = false;
+  private _stopped = false;
   private _agentState: AgentState = 'idle';
   /** Queued turn while current one is still processing */
-  private pendingTurn: { speaker: string; text: string } | null = null;
+  private pendingTurn: PendingTurn | null = null;
 
   constructor(options: PipelineOptions) {
     super();
@@ -210,6 +219,7 @@ export class Pipeline extends EventEmitter {
     const stream = this.stt.createStream();
     this.sttStreams.set(identity, stream);
     this._running = true;
+    this._stopped = false;
 
     stream.on('transcription', (result) => {
       this.handleTranscription(identity, result);
@@ -244,8 +254,11 @@ export class Pipeline extends EventEmitter {
 
   async stop(): Promise<void> {
     this._running = false;
+    this._stopped = true;
+    this.pendingTurn = null;
     this.turnDetector.reset();
     this.bargeIn.reset();
+    this.audioOutput.flush();
     this.splitter.reset();
 
     for (const [, stream] of this.sttStreams) {
@@ -272,10 +285,8 @@ export class Pipeline extends EventEmitter {
     }
   }
 
-  private lastFinalAt = 0;
-  private lastSttDuration = 0;
-
   private async handleTranscription(speaker: string, result: TranscriptionResult): Promise<void> {
+    if (this._stopped) return;
     this.emit('transcription', { ...result, speaker });
 
     // Any interim (including empty VAD speech_start) → user is speaking
@@ -289,14 +300,13 @@ export class Pipeline extends EventEmitter {
 
     if (result.isFinal && result.text.trim()) {
       const text = result.text.trim();
-      this.lastFinalAt = performance.now();
-      this.lastSttDuration = result.sttDuration ?? 0;
+      const turn = { speaker, text, finalAt: performance.now(), sttDuration: result.sttDuration ?? 0 };
 
       // Store every turn to memory (async, non-blocking)
       this.memory?.storeTurn(speaker, text, false);
 
       if (await this.shouldRespond(speaker, text)) {
-        this.processTurn(speaker, text);
+        this.processTurn(turn);
       } else {
         log.info(`Not responding to "${speaker}": "${text.slice(0, 60)}" (mode=${this.respondMode})`);
         this.setAgentState('idle');
@@ -330,20 +340,24 @@ export class Pipeline extends EventEmitter {
     return true;
   }
 
-  private async processTurn(speaker: string, text: string): Promise<void> {
+  private async processTurn(turn: PendingTurn): Promise<void> {
+    if (this._stopped) return;
+    const { speaker, text, sttDuration } = turn;
     if (this._processing) {
       log.info(`Queuing turn (current still processing): "${text}"`);
-      this.pendingTurn = { speaker, text };
+      this.pendingTurn = turn;
       this.bargeIn.trigger();
       return;
     }
 
     this._processing = true;
-    await this._warmupPromise;
+    const signal = this.bargeIn.startCycle();
+    let taskFailure: { error: unknown } | undefined;
 
     // ── Latency tracking ──
-    const tSpeechEnd = this.lastFinalAt;
-    const sttDuration = this.lastSttDuration;
+    const tStarted = performance.now();
+    const queueMs = tStarted - turn.finalAt;
+    let tLlmStarted = 0;
     let tLlmFirstToken = 0;
     let tFirstSentence = 0;
     let tFirstAudioPlayed = 0;
@@ -352,23 +366,26 @@ export class Pipeline extends EventEmitter {
     log.info(`Processing turn from "${speaker}": ${text}`);
 
     try {
+      await waitWithSignal(this._warmupPromise, signal);
+      signal.throwIfAborted();
       this.context.addUserTurn(speaker, text);
 
       if (this.context.shouldSummarize()) {
-        await this.context.summarize(this.llm);
+        await this.context.summarize(this.llm, signal);
       }
-
-      const signal = this.bargeIn.startCycle();
+      signal.throwIfAborted();
 
       // Search memory for relevant past context
       let memoryContext = '';
       if (this.memory) {
         try {
-          memoryContext = await this.memory.searchRelevant(text);
+          memoryContext = await waitWithSignal(this.memory.searchRelevant(text), signal);
         } catch (err) {
+          if (signal.aborted) throw err;
           log.warn('Memory search failed:', err);
         }
       }
+      signal.throwIfAborted();
 
       const messages = this.context.buildMessages(memoryContext || undefined);
       let fullResponse = '';
@@ -389,7 +406,7 @@ export class Pipeline extends EventEmitter {
         if (isFirstSentence) {
           tFirstSentence = performance.now();
           isFirstSentence = false;
-          log.info(`first_sentence: ${(tFirstSentence - tSpeechEnd).toFixed(0)}ms — "${text.slice(0, 60)}"`);
+          log.info(`first_sentence: ${(tFirstSentence - tLlmStarted).toFixed(0)}ms — "${text.slice(0, 60)}"`);
         }
         sentenceQueue.push(text);
         wake();
@@ -440,7 +457,7 @@ export class Pipeline extends EventEmitter {
                 if (isFirstChunk) {
                   tLlmFirstToken = performance.now();
                   isFirstChunk = false;
-                  log.info(`llm_first_segment: ${(tLlmFirstToken - tSpeechEnd).toFixed(0)}ms`);
+                  log.info(`llm_first_segment: ${(tLlmFirstToken - tLlmStarted).toFixed(0)}ms`);
                 }
 
                 // Track clean text for context/memory (not JSON)
@@ -458,7 +475,7 @@ export class Pipeline extends EventEmitter {
                 if (isFirstChunk) {
                   tLlmFirstToken = performance.now();
                   isFirstChunk = false;
-                  log.info(`llm_first_token: ${(tLlmFirstToken - tSpeechEnd).toFixed(0)}ms`);
+                  log.info(`llm_first_token: ${(tLlmFirstToken - tLlmStarted).toFixed(0)}ms`);
                 }
 
                 fullResponse += chunk.token;
@@ -561,7 +578,7 @@ export class Pipeline extends EventEmitter {
             } catch (ttsErr: unknown) {
               // TTS error on a prefetched sentence should not kill the turn —
               // previous sentences already played successfully.
-              if (ttsErr instanceof Error && ttsErr.name === 'AbortError') throw ttsErr;
+              if (isCancellation(ttsErr, signal)) throw ttsErr;
               log.warn(`TTS error for sentence (skipping): "${sentence.slice(0, 40)}"`, ttsErr);
             }
           }
@@ -573,24 +590,54 @@ export class Pipeline extends EventEmitter {
         }
       };
 
-      await Promise.all([producer(), consumer()]);
+      // Keep ownership until BOTH tasks have unwound. In particular, a failed
+      // producer must wake the consumer waiting for its first sentence.
+      const runTask = async (task: () => Promise<void>) => {
+        try {
+          await task();
+        } catch (error) {
+          // Classify before cancelling the sibling, so real errors stay visible.
+          if (!isCancellation(error, signal)) taskFailure ??= { error };
+          this.bargeIn.cancelCycle();
+        } finally {
+          wake();
+        }
+      };
+      signal.addEventListener('abort', wake);
+      try {
+        tLlmStarted = performance.now();
+        await Promise.all([
+          runTask(async () => {
+            try { await producer(); }
+            finally { producerDone = true; wake(); }
+          }),
+          runTask(consumer),
+        ]);
+      } finally {
+        signal.removeEventListener('abort', wake);
+      }
+      if (taskFailure) throw taskFailure.error;
+      signal.throwIfAborted();
 
       // ── Latency summary ──
-      // STT:  last interim (≈ end of speech) → final transcript received
-      // LLM:  final transcript → first complete sentence (TTFT + accumulation)
+      // STT: server-reported processing time; excludes endpointing wait.
+      // Queue: final received → cycle acquired. Prepare: warmup/summary/memory.
+      // LLM: request start → first complete sentence (TTFT + accumulation).
       // TTS:  first sentence ready → first audio chunk to WebRTC
-      // Overall: STT + LLM + TTS
-      const ttftMs = tLlmFirstToken ? tLlmFirstToken - tSpeechEnd : 0;
-      const llmMs = tFirstSentence ? tFirstSentence - tSpeechEnd : 0;
+      // Overall includes queue/preparation, but still excludes endpointing wait.
+      const prepareMs = tLlmStarted - tStarted;
+      const ttftMs = tLlmFirstToken ? tLlmFirstToken - tLlmStarted : 0;
+      const llmMs = tFirstSentence ? tFirstSentence - tLlmStarted : 0;
       const ttsMs = tFirstAudioPlayed && tFirstSentence ? tFirstAudioPlayed - tFirstSentence : 0;
-      const overallMs = sttDuration + llmMs + ttsMs;
+      const overallMs = sttDuration + queueMs + prepareMs + llmMs + ttsMs;
 
       log.info(
         `LATENCY "${text.slice(0, 30)}": ` +
         `STT=${sttDuration.toFixed(0)}ms ` +
+        `Queue=${queueMs.toFixed(0)}ms Prepare=${prepareMs.toFixed(0)}ms ` +
         `LLM=${llmMs.toFixed(0)}ms (TTFT=${ttftMs.toFixed(0)}ms) ` +
         `TTS=${ttsMs.toFixed(0)}ms ` +
-        `Overall=${overallMs.toFixed(0)}ms`,
+        `Overall=${tFirstSentence ? `${overallMs.toFixed(0)}ms` : 'n/a (no text response)'}`,
       );
 
       if (fullResponse.trim()) {
@@ -604,21 +651,22 @@ export class Pipeline extends EventEmitter {
       if (producedAudio) await waitForAudioDrain(signal);
       this.setAgentState('idle');
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
+      if (!taskFailure && isCancellation(err, signal)) {
         log.debug('Turn processing aborted (barge-in)');
       } else {
         log.error('Error processing turn:', err);
         this.emit('error', err instanceof Error ? err : new Error(String(err)));
       }
     } finally {
-      this._processing = false;
       this.bargeIn.reset();
+      this.setAgentState('idle');
+      this._processing = false;
 
-      if (this.pendingTurn) {
-        const { speaker: nextSpeaker, text: nextText } = this.pendingTurn;
+      if (!this._stopped && this.pendingTurn) {
+        const nextTurn = this.pendingTurn;
         this.pendingTurn = null;
-        log.info(`Processing queued turn from "${nextSpeaker}": ${nextText}`);
-        this.processTurn(nextSpeaker, nextText);
+        log.info(`Processing queued turn from "${nextTurn.speaker}": ${nextTurn.text}`);
+        this.processTurn(nextTurn);
       }
     }
   }
@@ -629,18 +677,22 @@ export class Pipeline extends EventEmitter {
    * Adds the text to conversation context so the LLM knows what was said.
    */
   async say(text: string): Promise<void> {
+    if (this._stopped) return;
     if (this._processing) {
       log.warn('say() called while processing — skipping');
       return;
     }
 
     this._processing = true;
-    await Promise.all([this._ttsWarmupPromise, this._audioReadyPromise]);
-    log.info(`say(): "${text.slice(0, 60)}"`);
+    const signal = this.bargeIn.startCycle();
+    let responseStarted = false;
 
     try {
-      const signal = this.bargeIn.startCycle();
+      await waitWithSignal(Promise.all([this._ttsWarmupPromise, this._audioReadyPromise]), signal);
+      signal.throwIfAborted();
+      log.info(`say(): "${text.slice(0, 60)}"`);
       this.audioOutput.beginResponse();
+      responseStarted = true;
       this.setAgentState('thinking');
       let producedAudio = false;
 
@@ -660,22 +712,23 @@ export class Pipeline extends EventEmitter {
       if (producedAudio) await waitForAudioDrain(signal);
       this.setAgentState('idle');
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
+      if (isCancellation(err, signal)) {
         log.debug('say() aborted (barge-in)');
       } else {
         log.error('Error in say():', err);
         this.emit('error', err instanceof Error ? err : new Error(String(err)));
       }
     } finally {
-      this._processing = false;
-      this.audioOutput.endResponse();
+      if (responseStarted) this.audioOutput.endResponse();
       this.bargeIn.reset();
+      this.setAgentState('idle');
+      this._processing = false;
 
-      if (this.pendingTurn) {
-        const { speaker: nextSpeaker, text: nextText } = this.pendingTurn;
+      if (!this._stopped && this.pendingTurn) {
+        const nextTurn = this.pendingTurn;
         this.pendingTurn = null;
-        log.info(`Processing queued turn from "${nextSpeaker}": ${nextText}`);
-        this.processTurn(nextSpeaker, nextText);
+        log.info(`Processing queued turn from "${nextTurn.speaker}": ${nextTurn.text}`);
+        this.processTurn(nextTurn);
       }
     }
   }
@@ -715,7 +768,7 @@ export class Pipeline extends EventEmitter {
       await this.audioOutput.writeStream(measuredStream(), signal);
       log.info(`synthesizeAndPlay done: ${(performance.now() - ttsStart).toFixed(0)}ms, ${ttsChunkCount} chunks for "${text.slice(0, 40)}"`);
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') return;
+      if (isCancellation(err, signal)) return;
       throw err;
     }
   }

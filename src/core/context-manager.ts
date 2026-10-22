@@ -123,7 +123,8 @@ export class ContextManager {
    * Summarize older turns using the LLM.
    * Keeps the most recent turns verbatim.
    */
-  async summarize(llm: LLMPlugin): Promise<void> {
+  async summarize(llm: LLMPlugin, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (this.turns.length <= this.recentTurnsToKeep) return;
 
     const olderTurns = this.turns.slice(0, -this.recentTurnsToKeep);
@@ -140,12 +141,15 @@ export class ContextManager {
     ];
 
     let summaryText = '';
-    for await (const chunk of llm.chat(summaryPrompt)) {
+    for await (const chunk of llm.chat(summaryPrompt, signal)) {
+      signal?.throwIfAborted();
       if (chunk.type === 'token' && chunk.token) {
         summaryText += chunk.token;
       }
     }
 
+    // Some providers finish quietly on cancellation. Never commit their partial summary.
+    signal?.throwIfAborted();
     this.summary = this.summary
       ? `${this.summary}\n\n${summaryText}`
       : summaryText;
