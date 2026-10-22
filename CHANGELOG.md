@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0 — 2026-10-22
+
+- Add complete-request SSML synthesis with capability negotiation and VoiceAgent.saySSML; preserve existing plain speech and language routing.
+- Add explicit OpenRouter reasoning effort, optional temperature omission and required-provider-parameter controls for compatible models.
+- Retain partial transcript lifecycle, cancellation and queue timing improvements from 0.4.1.
+
 ## 0.4.1 — 2026-10-22
 
 - Create the response cancellation signal before warmup and summarization; pass it through summary generation and discard cancelled summaries without changing conversation history.

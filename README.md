@@ -187,7 +187,7 @@ const agent = new VoiceAgent({
 
 Apache-2.0
 
-### Complete-request SSML (candidate)
+### Complete-request SSML (0.5.0+)
 
 `DtelecomTTS.synthesizeSSML(document, signal)` negotiates `dtelecom-ssml-v1`
 with the server and sends one complete document unchanged. It does not use the
@@ -209,3 +209,20 @@ Barge-in uses the same cancellation path as `say()`. Ordinary `say()` and stream
 LLM responses remain plain text. Incremental SSML and word-timing marks are not
 implemented. Server-side validation and expanded-text metering are authoritative;
 see the TTS server's `docs/ssml.md` for the supported subset and bounds.
+
+### OpenRouter model controls
+
+For providers that require explicit reasoning settings or reject sampling parameters:
+
+```ts
+new OpenRouterLLM({
+  apiKey: process.env.OPENROUTER_API_KEY!,
+  model: 'openai/gpt-6-luna',
+  reasoningEffort: 'none',
+  temperature: null, // omit the temperature parameter
+  providerRouting: { sort: 'latency', requireParameters: true },
+});
+```
+
+These controls also apply to plain-text summarization requests. Existing callers
+retain the 0.7 temperature default and omit reasoning effort unless configured.

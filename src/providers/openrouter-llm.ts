@@ -18,8 +18,10 @@ export interface OpenRouterLLMOptions {
   model: string;
   /** Max tokens in response (default: 512) */
   maxTokens?: number;
-  /** Sampling temperature 0-2 (default: 0.7) */
-  temperature?: number;
+  /** Sampling temperature 0-2 (default: 0.7); null omits it for models that reject it. */
+  temperature?: number | null;
+  /** Forward explicit reasoning effort to compatible OpenRouter providers. */
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   /** OpenRouter provider routing preferences */
   providerRouting?: {
     /** Sort providers by metric (e.g. 'latency') */
@@ -28,6 +30,8 @@ export interface OpenRouterLLMOptions {
     order?: string[];
     /** Allow fallback to other providers if pinned ones fail */
     allowFallbacks?: boolean;
+    /** Require the selected provider to support every requested parameter. */
+    requireParameters?: boolean;
   };
   /** Structured output via constrained decoding (e.g. for multi-language segment routing) */
   responseFormat?: {
@@ -40,8 +44,9 @@ export class OpenRouterLLM implements LLMPlugin {
   private readonly apiKey: string;
   private readonly model: string;
   private readonly maxTokens: number;
-  private readonly temperature: number;
-  private readonly provider?: { sort?: string; order?: string[]; allow_fallbacks?: boolean };
+  private readonly temperature: number | null;
+  private readonly reasoningEffort?: OpenRouterLLMOptions['reasoningEffort'];
+  private readonly provider?: { sort?: string; order?: string[]; allow_fallbacks?: boolean; require_parameters?: boolean };
   private readonly responseFormat?: OpenRouterLLMOptions['responseFormat'];
 
   constructor(options: OpenRouterLLMOptions) {
@@ -51,13 +56,15 @@ export class OpenRouterLLM implements LLMPlugin {
     this.apiKey = options.apiKey;
     this.model = options.model;
     this.maxTokens = options.maxTokens ?? 512;
-    this.temperature = options.temperature ?? 0.7;
+    this.temperature = options.temperature === undefined ? 0.7 : options.temperature;
+    this.reasoningEffort = options.reasoningEffort;
 
     if (options.providerRouting) {
       this.provider = {
         sort: options.providerRouting.sort,
         order: options.providerRouting.order,
         allow_fallbacks: options.providerRouting.allowFallbacks,
+        require_parameters: options.providerRouting.requireParameters,
       };
     }
 
@@ -93,7 +100,8 @@ export class OpenRouterLLM implements LLMPlugin {
       model: this.model,
       messages,
       max_tokens: this.maxTokens,
-      temperature: this.temperature,
+      ...(this.temperature === null ? {} : { temperature: this.temperature }),
+      ...(this.reasoningEffort === undefined ? {} : { reasoning_effort: this.reasoningEffort }),
       stream: true,
     };
     if (this.provider) {
