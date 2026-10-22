@@ -509,7 +509,8 @@ export class Pipeline extends EventEmitter {
               state.prefetched = null;
             } else if (sentenceQueue.length > 0) {
               sentence = sentenceQueue.shift()!;
-              if (!/\w/.test(sentence)) {
+              // Speech can use any writing system, not only ASCII word characters.
+              if (!/[\p{L}\p{N}]/u.test(sentence)) {
                 log.debug(`Skipping non-word sentence: "${sentence}"`);
                 continue;
               }
@@ -531,7 +532,7 @@ export class Pipeline extends EventEmitter {
               if (state.prefetched || !canPrefetch) return;
               if (sentenceQueue.length > 0) {
                 const next = sentenceQueue.shift()!;
-                if (/\w/.test(next)) {
+                if (/[\p{L}\p{N}]/u.test(next)) {
                   state.prefetched = { sentence: next, streamFn: prefetchTTS(this.tts!, next, signal) };
                 }
               }
