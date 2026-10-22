@@ -60,6 +60,13 @@ export class VoiceAgent extends EventEmitter {
     await this.pipeline.say(text);
   }
 
+  /** Speak a complete SSML document; plain displayText is used for context/events. */
+  async saySSML(ssml: string, displayText: string): Promise<void> {
+    if (!this.pipeline) throw new Error('Agent not started — call start() first');
+    if (!displayText.trim()) throw new Error('SSML requires plain display text');
+    await this.pipeline.say(displayText, { ssml });
+  }
+
   /**
    * Switch STT language on all active streams.
    * Use for bilingual lessons — e.g. switch to 'es' with forceWhisper when

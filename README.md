@@ -186,3 +186,26 @@ const agent = new VoiceAgent({
 ## License
 
 Apache-2.0
+
+### Complete-request SSML (candidate)
+
+`DtelecomTTS.synthesizeSSML(document, signal)` negotiates `dtelecom-ssml-v1`
+with the server and sends one complete document unchanged. It does not use the
+legacy language-tag splitter or insert language-switch silence. Servers must
+explicitly enable the profile; unsupported servers are rejected before markup
+is sent for synthesis.
+
+For greetings or announcements, use:
+
+```ts
+await agent.saySSML(
+  '<speak>Hello.<break time="400ms"/>Welcome back.</speak>',
+  'Hello. Welcome back.',
+);
+```
+
+The second argument supplies plain display and conversation-context text.
+Barge-in uses the same cancellation path as `say()`. Ordinary `say()` and streamed
+LLM responses remain plain text. Incremental SSML and word-timing marks are not
+implemented. Server-side validation and expanded-text metering are authoritative;
+see the TTS server's `docs/ssml.md` for the supported subset and bounds.

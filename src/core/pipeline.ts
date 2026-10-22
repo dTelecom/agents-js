@@ -676,8 +676,9 @@ export class Pipeline extends EventEmitter {
    * Supports barge-in — if a participant speaks, the playback is cut short.
    * Adds the text to conversation context so the LLM knows what was said.
    */
-  async say(text: string): Promise<void> {
+  async say(text: string, options?: { ssml: string }): Promise<void> {
     if (this._stopped) return;
+    if (options && !this.tts?.synthesizeSSML) throw new Error('TTS provider does not support complete-document SSML');
     if (this._processing) {
       log.warn('say() called while processing — skipping');
       return;
@@ -700,7 +701,7 @@ export class Pipeline extends EventEmitter {
         producedAudio = true;
         this.setAgentState('speaking');
         this.emit('sentence', this.cleanText(text), text);
-      });
+      }, options ? this.tts!.synthesizeSSML!(options.ssml, signal) : undefined);
 
       if (!signal.aborted) {
         await this.audioOutput.writeSilence(40);

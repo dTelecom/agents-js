@@ -160,10 +160,47 @@ export class DtelecomTTS implements TTSPlugin {
     }
   }
 
+  /** Forward one complete document unchanged, without local language pauses. */
+  async *synthesizeSSML(ssml: string, signal?: AbortSignal): AsyncGenerator<Buffer> {
+    yield* this.synthesizeSegment(this.defaultLang, ssml, signal, 'ssml');
+  }
+
+  private async requireSSML(ws: WebSocket, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error('SSML request aborted');
+    await new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        ws.off('message', onMessage);
+        ws.off('close', onClose);
+        ws.off('error', onError);
+        signal?.removeEventListener('abort', onAbort);
+        if (error) reject(error); else resolve();
+      };
+      const onClose = () => finish(new Error('TTS disconnected during SSML negotiation'));
+      const onError = (error: Error) => finish(error);
+      const onAbort = () => finish(new Error('SSML request aborted'));
+      const onMessage = (data: WebSocket.RawData, binary: boolean) => {
+        if (binary) return;
+        let message: { type?: string; ssml_profiles?: unknown };
+        try { message = JSON.parse(data.toString()); } catch { return; }
+        if (message.type !== 'capabilities') return;
+        finish(Array.isArray(message.ssml_profiles) && message.ssml_profiles.includes('dtelecom-ssml-v1')
+          ? undefined : new Error('Server does not enable dtelecom-ssml-v1'));
+      };
+      const timer = setTimeout(() => finish(new Error('Server did not confirm SSML support')), 2000);
+      ws.on('message', onMessage);
+      ws.once('close', onClose);
+      ws.once('error', onError);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      try { ws.send(JSON.stringify({ type: 'capabilities' })); } catch (error) { finish(error as Error); }
+    });
+  }
+
   private async *synthesizeSegment(
     lang: string,
     text: string,
     signal?: AbortSignal,
+    inputFormat: 'text' | 'ssml' = 'text',
   ): AsyncGenerator<Buffer> {
     if (signal?.aborted) return;
 
@@ -173,6 +210,12 @@ export class DtelecomTTS implements TTSPlugin {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       throw new Error('dTelecom TTS WebSocket not connected');
+    }
+
+    if (inputFormat === 'ssml') {
+      await this.requireSSML(ws, signal);
+      if (signal?.aborted) return;
+      if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) throw new Error('TTS connection changed during SSML negotiation');
     }
 
     // Cancel any stale in-flight generation
@@ -206,6 +249,7 @@ export class DtelecomTTS implements TTSPlugin {
     // Send text with per-message voice/language override
     const voiceConfig = this.voices[lang];
     const msg: Record<string, unknown> = { text };
+    if (inputFormat === 'ssml') msg.input_format = 'ssml';
     if (voiceConfig) {
       msg.voice = voiceConfig.voice;
       msg.lang_code = voiceConfig.langCode;

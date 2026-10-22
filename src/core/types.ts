@@ -94,6 +94,8 @@ export interface LLMPlugin {
 
 export interface TTSPlugin {
   synthesize(text: string, signal?: AbortSignal): AsyncGenerator<Buffer>;
+  /** Optional complete-document SSML; never pass through sentence splitting. */
+  synthesizeSSML?(ssml: string, signal?: AbortSignal): AsyncGenerator<Buffer>;
   /** Optional: pre-connect to TTS server */
   warmup?(): Promise<void>;
   /** Strip provider-specific markup from text for display/events. */
