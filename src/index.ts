@@ -47,6 +47,8 @@ export type {
   STTStream,
   STTStreamOptions,
   TranscriptionResult,
+  STTPartialEnd,
+  STTReady,
   LLMPlugin,
   LLMChunk,
   LLMChatOptions,

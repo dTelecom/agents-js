@@ -214,6 +214,15 @@ export class Pipeline extends EventEmitter {
     stream.on('transcription', (result) => {
       this.handleTranscription(identity, result);
     });
+    stream.on('transcription_partial', (result) => {
+      this.emit('transcription_partial', { ...result, speaker: identity });
+    });
+    stream.on('partial_end', (result) => {
+      this.emit('partial_end', { ...result, speaker: identity });
+    });
+    stream.on('ready', (result) => {
+      this.emit('stt_ready', { ...result, speaker: identity });
+    });
 
     stream.on('error', (error) => {
       log.error(`STT error for ${identity}:`, error);

@@ -1,4 +1,4 @@
-# @dtelecom/agents
+# @dtelecom/agents-js
 
 AI voice agent framework for [dTelecom](https://dtelecom.org) rooms. Build real-time voice agents that join WebRTC rooms and interact with participants using speech-to-text, LLMs, and text-to-speech.
 
@@ -21,14 +21,14 @@ For dTelecom TTS, cancellation sends `clear` and waits for `cleared` before reus
 ## Install
 
 ```bash
-npm install @dtelecom/agents @dtelecom/server-sdk-js @dtelecom/server-sdk-node
+npm install @dtelecom/agents-js @dtelecom/server-sdk-js @dtelecom/server-sdk-node
 ```
 
 ## Quick Start
 
 ```ts
-import { VoiceAgent, setLogLevel } from '@dtelecom/agents';
-import { DeepgramSTT, OpenRouterLLM, CartesiaTTS } from '@dtelecom/agents/providers';
+import { VoiceAgent, setLogLevel } from '@dtelecom/agents-js';
+import { DeepgramSTT, OpenRouterLLM, CartesiaTTS } from '@dtelecom/agents-js/providers';
 
 const agent = new VoiceAgent({
   stt: new DeepgramSTT({ apiKey: process.env.DEEPGRAM_API_KEY! }),
@@ -85,6 +85,33 @@ interface TTSPlugin {
 }
 ```
 
+## dTelecom partial transcripts and Smart Turn
+
+```ts
+import { DtelecomSTT } from '@dtelecom/agents-js/providers';
+
+const stt = new DtelecomSTT({
+  serverUrl: session.stt.serverUrl,
+  sessionKey: session.stt.token,
+  language: 'en',
+  partials: true,
+  smartTurn: true, // independent opt-in; omit for ordinary acoustic endpointing
+});
+```
+
+Both options are omitted by default, preserving existing final-only behavior. `partials` requests replaceable recognition windows. The provider sends `smartTurn` as `smart_turn`; it requires a configured server model and supported ANE VAD language route. These choices survive language changes and reconnects.
+
+With this provider in `VoiceAgent`, subscribe to:
+
+- `transcription_partial`: `{ text, isFinal: false, utteranceId, revision, windowStartSeconds, provisional: true, replacePrevious: true, speaker }`. Replace the displayed provisional window; do not append it to committed text.
+- `partial_end`: `{ utteranceId, reason, speaker }`. Clear provisional text on `finalizing`, `discarded`, `replaced` or `reconfigured`.
+- `transcription`: partials also appear here with `isFinal: false`; finals carry the same `utteranceId` and supersede them. Only finals start an LLM turn. Nonempty partials can trigger barge-in while the agent is speaking.
+- `stt_ready`: `{ clientId?, language?, smartTurn?, speaker }`. `smartTurn: "active"` confirms the semantic hook; `"acoustic_fallback"` reports silence detection. An absent field does not confirm activation. Missing server-model errors surface through `error`.
+
+Raw `STTStream` exposes the same events without `speaker`, with `ready` instead of `stt_ready`. Providers other than dTelecom may not emit these optional event types. For transcript display, subscribe to either `transcription_partial` or nonfinal `transcription`, not both.
+
+Smart Turn is available as an explicit option, not a blanket quality guarantee. In the 21 October M6 diagnostic it prevented 10 of 13 premature splits on 14 natural examples; seven examples then finalized in roughly 2.1–2.3 seconds. See [the Smart Turn integration notes](SMART_TURN.md) for the acceptance targets, measured limitations and enablement path.
+
 ## Configuration
 
 | Option | Type | Default | Description |
@@ -114,7 +141,7 @@ interface TTSPlugin {
 Implement the plugin interface and pass it to `VoiceAgent`:
 
 ```ts
-import { BaseSTTStream, type STTPlugin, type STTStreamOptions } from '@dtelecom/agents';
+import { BaseSTTStream, type STTPlugin, type STTStreamOptions } from '@dtelecom/agents-js';
 
 class MySTTStream extends BaseSTTStream {
   sendAudio(pcm16: Buffer): void {

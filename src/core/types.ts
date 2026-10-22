@@ -7,6 +7,24 @@ export interface TranscriptionResult {
   language?: string;
   /** Time in ms from last interim result to this final result (STT + end-of-turn). Only on isFinal. */
   sttDuration?: number;
+  /** Correlates provisional windows with their authoritative final. */
+  utteranceId?: string;
+  revision?: number;
+  windowStartSeconds?: number;
+  provisional?: boolean;
+  replacePrevious?: boolean;
+}
+
+export interface STTPartialEnd {
+  utteranceId: string;
+  reason: 'finalizing' | 'discarded' | 'replaced' | 'reconfigured';
+}
+
+export interface STTReady {
+  clientId?: string;
+  language?: string;
+  /** Reported only when requested; absence does not confirm activation. */
+  smartTurn?: 'active' | 'acoustic_fallback';
 }
 
 export interface STTStreamOptions {
@@ -18,6 +36,9 @@ export interface STTStream {
   /** Switch language mid-session (only supported by some providers, e.g. DtelecomSTT) */
   setLanguage?(language: string, options?: { forceWhisper?: boolean }): void;
   on(event: 'transcription', cb: (result: TranscriptionResult) => void): this;
+  on(event: 'transcription_partial', cb: (result: TranscriptionResult) => void): this;
+  on(event: 'partial_end', cb: (result: STTPartialEnd) => void): this;
+  on(event: 'ready', cb: (result: STTReady) => void): this;
   on(event: 'error', cb: (error: Error) => void): this;
   close(): Promise<void>;
 }
@@ -178,6 +199,9 @@ export type AgentState = 'idle' | 'listening' | 'thinking' | 'speaking';
 
 export interface AgentEvents {
   transcription: (result: TranscriptionResult & { speaker: string }) => void;
+  transcription_partial: (result: TranscriptionResult & { speaker: string }) => void;
+  partial_end: (result: STTPartialEnd & { speaker: string }) => void;
+  stt_ready: (result: STTReady & { speaker: string }) => void;
   /** Emitted after each sentence finishes playing via TTS. */
   sentence: (text: string) => void;
   /** Emitted after the full response finishes playing. */
@@ -193,6 +217,9 @@ export interface AgentEvents {
 
 export interface PipelineEvents {
   transcription: (result: TranscriptionResult & { speaker: string }) => void;
+  transcription_partial: (result: TranscriptionResult & { speaker: string }) => void;
+  partial_end: (result: STTPartialEnd & { speaker: string }) => void;
+  stt_ready: (result: STTReady & { speaker: string }) => void;
   sentence: (text: string) => void;
   response: (text: string) => void;
   agentState: (state: AgentState) => void;

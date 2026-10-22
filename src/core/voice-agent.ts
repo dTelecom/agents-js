@@ -124,6 +124,9 @@ export class VoiceAgent extends EventEmitter {
 
     // Forward pipeline events
     this.pipeline.on('transcription', (result) => this.emit('transcription', result));
+    this.pipeline.on('transcription_partial', (result) => this.emit('transcription_partial', result));
+    this.pipeline.on('partial_end', (result) => this.emit('partial_end', result));
+    this.pipeline.on('stt_ready', (result) => this.emit('stt_ready', result));
     this.pipeline.on('sentence', (text, raw) => this.emit('sentence', text, raw));
     this.pipeline.on('response', (text) => this.emit('response', text));
     this.pipeline.on('agentState', (state) => this.emit('agentState', state));
