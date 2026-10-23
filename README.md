@@ -8,8 +8,8 @@ AI voice agent framework for [dTelecom](https://dtelecom.org) rooms. Build real-
 Participant mic -> SFU -> server-sdk-node (Opus decode) -> PCM16 16kHz
   -> STT plugin -> transcription
   -> LLM plugin -> streaming text response
-  -> Sentence splitter -> TTS plugin -> PCM16 16kHz
-  -> AudioSource (upsample 48kHz + Opus encode) -> SFU -> Participants
+  -> Sentence splitter -> TTS plugin -> PCM16 48kHz
+  -> AudioSource (48kHz Opus encode) -> SFU -> Participants
 ```
 
 The pipeline uses a producer/consumer pattern: LLM tokens are split into sentences and queued, while a consumer synthesizes and plays audio concurrently. This minimizes time-to-first-audio.
@@ -28,7 +28,7 @@ For dTelecom TTS, cancellation sends `clear` and waits for `cleared` before reus
 npm install @dtelecom/agents-js @dtelecom/server-sdk-js @dtelecom/server-sdk-node
 ```
 
-## Quick Start
+## Quick Start (other providers)
 
 ```ts
 import { VoiceAgent, setLogLevel } from '@dtelecom/agents-js';
@@ -53,6 +53,38 @@ await agent.start({
   apiSecret: process.env.DTELECOM_API_SECRET!,
 });
 ```
+
+## dTelecom gateway speech
+
+Create a prepaid bundle with `DtelecomGateway` from `@dtelecom/x402-client`, then pass its tokens to the providers. This example assumes `gateway` is configured with a funded wallet and `llm` implements the LLM plugin interface:
+
+```ts
+import { VoiceAgent } from '@dtelecom/agents-js';
+import { DtelecomSTT, DtelecomTTS } from '@dtelecom/agents-js/providers';
+
+const session = await gateway.createAgentSession({
+  roomName: 'voice-demo', participantIdentity: 'assistant',
+  clientIdentity: 'listener', durationMinutes: 5, language: 'en',
+});
+const agent = new VoiceAgent({
+  stt: new DtelecomSTT({
+    serverUrl: session.stt.serverUrl, sessionKey: session.stt.token,
+    language: 'en', partials: true, smartTurn: true,
+  }),
+  tts: new DtelecomTTS({
+    serverUrl: session.tts.serverUrl, sessionKey: session.tts.token,
+    voices: { en: { voice: 'M5', langCode: 'en' }, ru: { voice: 'M5', langCode: 'ru' } },
+    speed: 1.1, // application preference; SDK default is 1.0
+    // watermark: true, // independent explicit opt-in
+  }),
+  llm, instructions: 'Be helpful and concise.',
+});
+await agent.start({ room: 'voice-demo', token: session.webrtc.agent.token, wsUrl: session.webrtc.agent.wsUrl });
+```
+
+The client joins with `session.webrtc.client`. STT is $0.004/connected session minute; TTS is $0.006/1,000 spoken Unicode code points; WebRTC is $0.001/audio participant minute. Two participants, one STT session and 500 TTS characters/minute cost $0.009/minute, excluding LLM charges. [Live pricing and enabled services](https://x402.dtelecom.org/v1/pricing).
+
+This framework runs live voice agents. Translation, file transcription/diarization, WAV jobs, vision and moderation use the separate [x402 client SDK](https://github.com/dTelecom/x402-client); they are not automatically invoked by VoiceAgent.
 
 ## Plugin Interfaces
 
@@ -114,7 +146,7 @@ With this provider in `VoiceAgent`, subscribe to:
 
 Raw `STTStream` exposes the same events without `speaker`, with `ready` instead of `stt_ready`. Providers other than dTelecom may not emit these optional event types. For transcript display, subscribe to either `transcription_partial` or nonfinal `transcription`, not both.
 
-Smart Turn is available as an explicit option, not a blanket quality guarantee. In the 21 October M6 diagnostic it prevented 10 of 13 premature splits on 14 natural examples; seven examples then finalized in roughly 2.1–2.3 seconds. See [the Smart Turn integration notes](SMART_TURN.md) for the acceptance targets, measured limitations and enablement path.
+Smart Turn defaults to off. Current server defaults are completion threshold 0.5, minimum pause 500 ms, maximum 2 seconds of received silence and classifier deadline 250 ms. These are not end-to-end latency guarantees. Use server-sdk-node 0.2.6 or later to supply silence during Opus DTX/input stalls. See [Smart Turn integration notes](SMART_TURN.md) for current behavior and separately dated historical acceptance results.
 
 ## Configuration
 
@@ -133,7 +165,10 @@ Smart Turn is available as an explicit option, not a blanket quality guarantee. 
 
 | Event | Payload | Description |
 |---|---|---|
-| `transcription` | `{ text, isFinal, speaker }` | STT transcription result |
+| `transcription` | `{ text, isFinal, speaker, utteranceId? }` | Final or provisional STT result |
+| `transcription_partial` | `{ text, utteranceId, revision, windowStartSeconds, speaker }` | Replace temporary display text |
+| `partial_end` | `{ utteranceId, reason, speaker }` | Clear temporary display text |
+| `stt_ready` | `{ clientId?, language?, smartTurn?, speaker }` | Check active/fallback endpointing |
 | `response` | `string` | Full agent response text |
 | `speaking` | `boolean` | Agent started/stopped speaking |
 | `error` | `Error` | Pipeline error |
@@ -183,10 +218,6 @@ const agent = new VoiceAgent({
 });
 ```
 
-## License
-
-Apache-2.0
-
 ### Complete-request SSML (0.5.0+)
 
 `DtelecomTTS.synthesizeSSML(document, signal)` negotiates `dtelecom-ssml-v1`
@@ -208,7 +239,7 @@ The second argument supplies plain display and conversation-context text.
 Barge-in uses the same cancellation path as `say()`. Ordinary `say()` and streamed
 LLM responses remain plain text. Incremental SSML and word-timing marks are not
 implemented. Server-side validation and expanded-text metering are authoritative;
-see the TTS server's `docs/ssml.md` for the supported subset and bounds.
+see the [public SSML contract](https://x402.dtelecom.org/docs.md#ssml-dtelecom-ssml-v1). One document stays within one engine, has a 60-second output bound, and uses effective speed 0.75–1.5. No additional SSML price multiplier applies.
 
 ### OpenRouter model controls
 
@@ -253,3 +284,7 @@ and SSML gain, before PCM16/Opus. It adds an 80 ms input buffer and approximatel
 5 ms inference in the M6 lab; live timing depends on load and audio arrival.
 No filter or resampling is applied after watermarking. Short/interrupted speech
 may not remain detectable. This option is off by default even on capable servers.
+
+## License
+
+Apache-2.0

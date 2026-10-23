@@ -13,7 +13,7 @@
  * - Single WebSocket connection (not per-language pool)
  * - Per-message voice/language switching instead of separate connections
  * - Server outputs 48kHz PCM16 (resampled from Kokoro's native 24kHz)
- * - Uses SSML <lang> tags to route text segments to correct voice (same as DeepgramTTS)
+ * - Uses legacy <lang> tags to route text segments to correct voice (same as DeepgramTTS)
  */
 
 import WebSocket from 'ws';
@@ -34,7 +34,7 @@ export interface DtelecomTTSOptions {
   serverUrl: string;
   /** JWT session key from x402 gateway */
   sessionKey: string;
-  /** Voice config per language: { en: { voice: "af_heart", langCode: "a" }, es: { voice: "bf_emma", langCode: "b" } } */
+  /** Voice config per language: { en: { voice: "af_heart", langCode: "a" }, es: { voice: "ef_dora", langCode: "e" } } */
   voices: Record<string, VoiceConfig>;
   /** Default language code (default: "en") */
   defaultLanguage?: string;

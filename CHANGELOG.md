@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1 — 2026-10-23
+
+- Correct the 48 kHz TTS diagram, gateway provider example, partial events, current Smart Turn guidance and public SSML documentation links.
+
 ## 0.6.0 — 2026-10-23
 
 - Add explicit `DtelecomTTS({ watermark: true })` opt-in for AudioSeal B, with capability negotiation and activation confirmation before yielding PCM. Plain text and complete-request SSML are supported; defaults stay unmarked.
