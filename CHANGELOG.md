@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0 — 2026-10-23
+
+- Add explicit `DtelecomTTS({ watermark: true })` opt-in for AudioSeal B, with capability negotiation and activation confirmation before yielding PCM. Plain text and complete-request SSML are supported; defaults stay unmarked.
+
 ## 0.5.0 — 2026-10-22
 
 - Add complete-request SSML synthesis with capability negotiation and VoiceAgent.saySSML; preserve existing plain speech and language routing.

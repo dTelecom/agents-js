@@ -226,3 +226,30 @@ new OpenRouterLLM({
 
 These controls also apply to plain-text summarization requests. Existing callers
 retain the 0.7 temperature default and omit reasoning effort unless configured.
+
+### Optional TTS watermark (0.6.0+)
+
+AudioSeal B is enabled only when the SDK user explicitly requests it:
+
+```ts
+const tts = new DtelecomTTS({
+  serverUrl,
+  sessionKey,
+  voices: { en: { voice: 'M5', langCode: 'en' } },
+  watermark: true,
+});
+```
+
+Omitting `watermark` or setting it to `false` keeps existing unmarked speech.
+The option applies to plain text and `synthesizeSSML()` independently of STT
+Smart Turn/partials. The server must enable the optional feature; the provider
+checks availability during warmup/first use, caches it per connection, and
+requires `watermark: "active"`
+before yielding PCM. It logs `TTS watermark=active (AudioSeal B)`. Unsupported
+servers or failed activation produce an error, never silent unmarked output.
+
+The accepted B configuration runs on 48 kHz float audio after TTS resampling
+and SSML gain, before PCM16/Opus. It adds an 80 ms input buffer and approximately
+5 ms inference in the M6 lab; live timing depends on load and audio arrival.
+No filter or resampling is applied after watermarking. Short/interrupted speech
+may not remain detectable. This option is off by default even on capable servers.

@@ -40,6 +40,8 @@ export interface DtelecomTTSOptions {
   defaultLanguage?: string;
   /** Speech speed multiplier (default: 1.0) */
   speed?: number;
+  /** Explicit opt-in to AudioSeal B. Default false; requires server support. */
+  watermark?: boolean;
 }
 
 /** Per-request state for tracking an in-flight synthesis. */
@@ -50,6 +52,7 @@ interface FlushState {
   cancelled: boolean;
   error: Error | null;
   wake: (() => void) | null;
+  watermarkConfirmed: boolean;
 }
 
 export class DtelecomTTS implements TTSPlugin {
@@ -58,10 +61,12 @@ export class DtelecomTTS implements TTSPlugin {
   private readonly voices: Record<string, VoiceConfig>;
   private readonly defaultLang: string;
   private readonly speed: number;
+  private readonly watermark: boolean;
 
   private ws: WebSocket | null = null;
   private connectPromise: Promise<void> | null = null;
   private flushState: FlushState | null = null;
+  private capabilities = new WeakMap<WebSocket, { ssml: boolean; watermark: boolean }>();
 
   /** Single WebSocket — pipeline must not prefetch TTS concurrently. */
   readonly sequential = true;
@@ -87,6 +92,10 @@ export class DtelecomTTS implements TTSPlugin {
     this.voices = { ...options.voices };
     this.defaultLang = options.defaultLanguage ?? Object.keys(this.voices)[0];
     this.speed = options.speed ?? 1.0;
+    if (options.watermark !== undefined && typeof options.watermark !== 'boolean') {
+      throw new Error('watermark must be a boolean');
+    }
+    this.watermark = options.watermark === true;
   }
 
   /** Pre-connect WebSocket to TTS server. */
@@ -95,6 +104,7 @@ export class DtelecomTTS implements TTSPlugin {
     const start = performance.now();
     try {
       await this.ensureConnection();
+      if (this.watermark && this.ws) await this.requireCapabilities(this.ws, false);
       log.info(`TTS warmup complete in ${(performance.now() - start).toFixed(0)}ms`);
     } catch (err) {
       log.warn('TTS warmup failed (non-fatal):', err);
@@ -165,8 +175,14 @@ export class DtelecomTTS implements TTSPlugin {
     yield* this.synthesizeSegment(this.defaultLang, ssml, signal, 'ssml');
   }
 
-  private async requireSSML(ws: WebSocket, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) throw new Error('SSML request aborted');
+  private async requireCapabilities(ws: WebSocket, ssml: boolean, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error('TTS request aborted');
+    const cached = this.capabilities.get(ws);
+    if (cached) {
+      if (this.watermark && !cached.watermark) throw new Error('Server does not enable TTS watermarking');
+      if (ssml && !cached.ssml) throw new Error('Server does not enable dtelecom-ssml-v1');
+      return;
+    }
     await new Promise<void>((resolve, reject) => {
       const finish = (error?: Error) => {
         clearTimeout(timer);
@@ -176,18 +192,26 @@ export class DtelecomTTS implements TTSPlugin {
         signal?.removeEventListener('abort', onAbort);
         if (error) reject(error); else resolve();
       };
-      const onClose = () => finish(new Error('TTS disconnected during SSML negotiation'));
+      const onClose = () => finish(new Error('TTS disconnected during capability negotiation'));
       const onError = (error: Error) => finish(error);
-      const onAbort = () => finish(new Error('SSML request aborted'));
+      const onAbort = () => finish(new Error('TTS request aborted'));
       const onMessage = (data: WebSocket.RawData, binary: boolean) => {
         if (binary) return;
-        let message: { type?: string; ssml_profiles?: unknown };
+        let message: { type?: string; ssml_profiles?: unknown; watermark?: unknown; message?: string };
         try { message = JSON.parse(data.toString()); } catch { return; }
+        if (message.type === 'error') return finish(new Error(message.message || 'TTS negotiation failed'));
         if (message.type !== 'capabilities') return;
-        finish(Array.isArray(message.ssml_profiles) && message.ssml_profiles.includes('dtelecom-ssml-v1')
+        this.capabilities.set(ws, {
+          watermark: message.watermark === true,
+          ssml: Array.isArray(message.ssml_profiles) && message.ssml_profiles.includes('dtelecom-ssml-v1'),
+        });
+        if (this.watermark && message.watermark !== true) {
+          return finish(new Error('Server does not enable TTS watermarking'));
+        }
+        finish(!ssml || (Array.isArray(message.ssml_profiles) && message.ssml_profiles.includes('dtelecom-ssml-v1'))
           ? undefined : new Error('Server does not enable dtelecom-ssml-v1'));
       };
-      const timer = setTimeout(() => finish(new Error('Server did not confirm SSML support')), 2000);
+      const timer = setTimeout(() => finish(new Error('Server did not confirm requested TTS capabilities')), 2000);
       ws.on('message', onMessage);
       ws.once('close', onClose);
       ws.once('error', onError);
@@ -212,10 +236,10 @@ export class DtelecomTTS implements TTSPlugin {
       throw new Error('dTelecom TTS WebSocket not connected');
     }
 
-    if (inputFormat === 'ssml') {
-      await this.requireSSML(ws, signal);
+    if (inputFormat === 'ssml' || this.watermark) {
+      await this.requireCapabilities(ws, inputFormat === 'ssml', signal);
       if (signal?.aborted) return;
-      if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) throw new Error('TTS connection changed during SSML negotiation');
+      if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) throw new Error('TTS connection changed during capability negotiation');
     }
 
     // Cancel any stale in-flight generation
@@ -226,7 +250,7 @@ export class DtelecomTTS implements TTSPlugin {
       this.flushState = null;
     }
 
-    const state: FlushState = { chunks: [], done: false, cleared: false, cancelled: false, error: null, wake: null };
+    const state: FlushState = { chunks: [], done: false, cleared: false, cancelled: false, error: null, wake: null, watermarkConfirmed: false };
     this.flushState = state;
 
     // Handle abort — send clear to cancel
@@ -249,6 +273,7 @@ export class DtelecomTTS implements TTSPlugin {
     // Send text with per-message voice/language override
     const voiceConfig = this.voices[lang];
     const msg: Record<string, unknown> = { text };
+    if (this.watermark) msg.watermark = true;
     if (inputFormat === 'ssml') msg.input_format = 'ssml';
     if (voiceConfig) {
       msg.voice = voiceConfig.voice;
@@ -355,6 +380,12 @@ export class DtelecomTTS implements TTSPlugin {
 
         if (isBinary) {
           if (state.cancelled) return;
+          if (this.watermark && !state.watermarkConfirmed) {
+            state.error = new Error('Server sent audio without confirming watermark activation');
+            state.wake?.();
+            ws.terminate();
+            return;
+          }
           // Binary frame = raw PCM16 48kHz audio (server resamples from Kokoro's 24kHz)
           const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
           state.chunks.push(buf);
@@ -371,6 +402,16 @@ export class DtelecomTTS implements TTSPlugin {
               state.done = true;
               state.wake?.();
             } else if (msg.type === 'generating') {
+              state.watermarkConfirmed = msg.watermark === 'active';
+              if (this.watermark) {
+                if (!state.watermarkConfirmed) {
+                  state.error = new Error('Server did not confirm watermark activation');
+                  state.wake?.();
+                  ws.terminate();
+                  return;
+                }
+                log.info('TTS watermark=active (AudioSeal B)');
+              }
               log.debug(`TTS generating: "${(msg.text as string)?.slice(0, 40)}"`);
             } else if (msg.type === 'error') {
               const errorMsg = (msg.message as string) || 'Unknown TTS error';
