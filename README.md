@@ -82,7 +82,7 @@ const agent = new VoiceAgent({
 await agent.start({ room: 'voice-demo', token: session.webrtc.agent.token, wsUrl: session.webrtc.agent.wsUrl });
 ```
 
-The client joins with `session.webrtc.client`. STT is $0.004/connected session minute; TTS is $0.006/1,000 spoken Unicode code points; WebRTC is $0.001/audio participant minute. Two participants, one STT session and 500 TTS characters/minute cost $0.009/minute, excluding LLM charges. [Live pricing and enabled services](https://x402.dtelecom.org/v1/pricing).
+The client joins with `session.webrtc.client`. STT is $0.004/connected session minute; TTS is $0.006/1,000 spoken Unicode code points; WebRTC is $0.0001/audio participant minute. Two participants, one STT session and 367 TTS characters/minute cost approximately $0.0064/minute, excluding LLM charges. [Live pricing and enabled services](https://x402.dtelecom.org/v1/pricing).
 
 This framework runs live voice agents. Translation, file transcription/diarization, WAV jobs, vision and moderation use the separate [x402 client SDK](https://github.com/dTelecom/x402-client); they are not automatically invoked by VoiceAgent.
 
