@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.2 — 2026-10-27
+
+- Publish corrected gateway pricing and the 367-character voice-agent usage example in the npm README. Documentation-only release; runtime behavior is unchanged.
+
 ## 0.6.1 — 2026-10-23
 
 - Correct the 48 kHz TTS diagram, gateway provider example, partial events, current Smart Turn guidance and public SSML documentation links.
