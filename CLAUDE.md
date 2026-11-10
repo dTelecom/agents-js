@@ -33,7 +33,7 @@ Pipeline uses producer/consumer pattern: LLM tokens → sentence splitter → se
 | Package | Role |
 |---|---|
 | `@dtelecom/server-sdk-node` | Node.js WebRTC (werift + @discordjs/opus). Room, AudioStream, AudioSource |
-| `@dtelecom/server-sdk-js` | AccessToken (Ed25519 JWT), getWsUrl() SFU discovery |
+| `@dtelecom/server-sdk-js` | `CloudClient` (>=4.1): agent WebRTC tokens and cloud STT/TTS sessions |
 | `ws` | WebSocket client for STT/TTS providers |
 
 ## Project Structure

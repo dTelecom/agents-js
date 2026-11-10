@@ -11,9 +11,16 @@
  * - Receive VAD events: {"type":"vad_event","event":"speech_start"|"speech_end"}
  * - Keepalive via {"type":"ping"} / {"type":"pong"}
  * - Mid-session reconfigure: send {"type":"config","language":"es","model":"whisper"} at any time
+ * - Extension: send {"type":"extend","session_key":"..."} with a new key before the session expires
+ *
+ * Two ways to authorise: a fixed `serverUrl` + `sessionKey` (x402), or `cloud`, a dTelecom Cloud
+ * client. With `cloud`, every stream (one per participant) opens its own STT session, linked to
+ * the agent's WebRTC session, and extends it before it runs out.
  */
 
 import WebSocket from 'ws';
+import type { CloudClient } from '@dtelecom/server-sdk-js';
+import { CloudSpeechSession, type CloudSTTSessionOptions } from './cloud-speech-session';
 import { BaseSTTStream } from '../core/base-stt-stream';
 import type { STTPlugin, STTStream, STTStreamOptions, TranscriptionResult, STTPartialEnd } from '../core/types';
 import { createLogger } from '../utils/logger';
@@ -23,10 +30,14 @@ const log = createLogger('DtelecomSTT');
 const KEEPALIVE_INTERVAL_MS = 5_000;
 
 export interface DtelecomSTTOptions {
-  /** Server base URL, e.g. "https://stt-xxx.dtel.network" */
-  serverUrl: string;
+  /** dTelecom Cloud client: each stream gets its own STT session. Instead of serverUrl + sessionKey. */
+  cloud?: CloudClient;
+  /** Cloud mode: how much time each session holds and when it is extended. */
+  cloudSession?: CloudSTTSessionOptions;
+  /** Server base URL, e.g. "https://stt-xxx.dtel.network" (x402) */
+  serverUrl?: string;
   /** JWT session key from x402 gateway */
-  sessionKey: string;
+  sessionKey?: string;
   /** Initial language (default: "auto" for Parakeet auto-detect) */
   language?: string;
   /** Force Whisper model even if Parakeet supports the language */
@@ -39,27 +50,36 @@ export interface DtelecomSTTOptions {
 
 export class DtelecomSTT implements STTPlugin {
   private readonly options: DtelecomSTTOptions;
+  private webrtcSessionId: string | undefined;
 
   constructor(options: DtelecomSTTOptions) {
-    if (!options.serverUrl) {
-      throw new Error('DtelecomSTT requires a serverUrl');
-    }
-    if (!options.sessionKey) {
-      throw new Error('DtelecomSTT requires a sessionKey');
+    if (!options.cloud) {
+      if (!options.serverUrl) {
+        throw new Error('DtelecomSTT requires a serverUrl (or cloud)');
+      }
+      if (!options.sessionKey) {
+        throw new Error('DtelecomSTT requires a sessionKey (or cloud)');
+      }
     }
     this.options = options;
   }
 
+  /** Cloud mode: links new STT sessions to the agent's WebRTC session. Called by VoiceAgent. */
+  setWebRTCSessionId(sessionId: string): void {
+    this.webrtcSessionId = sessionId;
+  }
+
   createStream(options?: STTStreamOptions): STTStream {
     const language = options?.language ?? this.options.language ?? 'auto';
-    return new DtelecomSTTStream(this.options, language);
+    return new DtelecomSTTStream(this.options, language, this.webrtcSessionId);
   }
 }
 
 class DtelecomSTTStream extends BaseSTTStream {
   private ws: WebSocket | null = null;
-  private readonly serverUrl: string;
-  private readonly sessionKey: string;
+  private serverUrl: string;
+  private sessionKey: string;
+  private cloudSession: CloudSpeechSession | null = null;
   private readonly forceWhisper: boolean;
   private readonly partials: boolean | undefined;
   private readonly smartTurn: boolean | undefined;
@@ -69,15 +89,47 @@ class DtelecomSTTStream extends BaseSTTStream {
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private language: string;
 
-  constructor(options: DtelecomSTTOptions, language: string) {
+  constructor(options: DtelecomSTTOptions, language: string, webrtcSessionId?: string) {
     super();
-    this.serverUrl = options.serverUrl;
-    this.sessionKey = options.sessionKey;
+    this.serverUrl = options.serverUrl ?? '';
+    this.sessionKey = options.sessionKey ?? '';
     this.language = language;
     this.forceWhisper = options.forceWhisper ?? false;
     this.partials = options.partials;
     this.smartTurn = options.smartTurn;
-    this.connect();
+    if (!options.cloud) {
+      this.connect();
+      return;
+    }
+    // Audio sent before the session is ready waits in pendingAudio, as during any connect.
+    this.cloudSession = new CloudSpeechSession({
+      kind: 'stt',
+      cloud: options.cloud,
+      language,
+      stt: options.cloudSession,
+      onExtended: (sessionKey) => this.sendExtension(sessionKey),
+      onError: (error) => this.emit('error', error),
+    });
+    this.cloudSession.open(webrtcSessionId).then(() => {
+      if (this._closed) {
+        this.cloudSession?.close();
+        return;
+      }
+      this.serverUrl = this.cloudSession!.serverUrl;
+      this.sessionKey = this.cloudSession!.token;
+      this.connect();
+    }, (err) => {
+      log.error('Cloud STT session failed:', err);
+      this.emit('error', err instanceof Error ? err : new Error(String(err)));
+    });
+  }
+
+  /** Hands the extended session key to the open socket; a reconnect uses it from then on. */
+  private sendExtension(sessionKey: string): void {
+    this.sessionKey = sessionKey;
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'extend', session_key: sessionKey }));
+    }
   }
 
   sendAudio(pcm16: Buffer): void {
@@ -118,6 +170,7 @@ class DtelecomSTTStream extends BaseSTTStream {
     this._ready = false;
     this.pendingAudio = [];
     this.stopKeepAlive();
+    this.cloudSession?.close();
 
     if (this.ws) {
       this.ws.close();

@@ -100,6 +100,8 @@ export class VoiceAgent extends EventEmitter {
     this.connection = new RoomConnection();
     await this.connection.connect({
       room: options.room,
+      cloud: options.cloud,
+      ttl: options.ttl,
       apiKey: options.apiKey,
       apiSecret: options.apiSecret,
       token: options.token,
@@ -107,6 +109,13 @@ export class VoiceAgent extends EventEmitter {
       identity: options.identity ?? 'agent',
       name: options.name ?? options.identity ?? 'AI Agent',
     });
+
+    // Cloud mode: speech sessions opened from now on are linked to the agent's room session.
+    const webrtcSessionId = this.connection.webrtcSessionId;
+    if (webrtcSessionId) {
+      this.config.stt.setWebRTCSessionId?.(webrtcSessionId);
+      this.config.tts?.setWebRTCSessionId?.(webrtcSessionId);
+    }
 
     // 3. Publish audio track + start sending silence to keep it active
     const source = await this.connection.publishAudioTrack();

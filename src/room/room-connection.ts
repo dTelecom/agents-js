@@ -1,4 +1,5 @@
 import { Room, LocalAudioTrack, AudioSource, TrackSource } from '@dtelecom/server-sdk-node';
+import type { CloudClient } from '@dtelecom/server-sdk-js';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('RoomConnection');
@@ -8,11 +9,16 @@ export interface RoomConnectionOptions {
   identity?: string;
   name?: string;
 
-  // Mode 1: Generate token from credentials (existing)
+  // Mode 1: dTelecom Cloud — the cloud mints the agent's token
+  cloud?: CloudClient;
+  /** Cloud mode: the agent's session lifetime, e.g. '6h' (default 6 hours, at most 24). */
+  ttl?: number | string;
+
+  // Mode 2: dTelecom Cloud API key and secret; builds a CloudClient (base URL from DTELECOM_CLOUD_URL)
   apiKey?: string;
   apiSecret?: string;
 
-  // Mode 2: Use pre-signed token from x402 gateway
+  // Mode 3: Use pre-signed token from x402 gateway
   token?: string;
   wsUrl?: string;
 }
@@ -22,6 +28,8 @@ export class RoomConnection {
   private audioSource: AudioSource | null = null;
   private localTrack: LocalAudioTrack | null = null;
   private _connected = false;
+  /** Cloud mode: the agent's WebRTC session id, which links its speech sessions to the room. */
+  webrtcSessionId: string | null = null;
 
   constructor() {
     this.room = new Room();
@@ -34,10 +42,9 @@ export class RoomConnection {
   /**
    * Connect to a dTelecom room.
    *
-   * 1. Create an Ed25519 JWT via AccessToken
-   * 2. Discover nearest SFU via getWsUrl()
-   * 3. Connect Room via WebRTC
-   * 4. Publish an audio track for the agent to speak through
+   * 1. Get a token and node URL: from dTelecom Cloud (cloud, or apiKey + apiSecret), or the
+   *    x402 gateway's pre-signed token + wsUrl
+   * 2. Connect Room via WebRTC
    */
   async connect(options: RoomConnectionOptions): Promise<void> {
     const { room: roomName, identity = 'agent', name } = options;
@@ -48,29 +55,22 @@ export class RoomConnection {
     let wsUrl: string;
 
     if (options.token && options.wsUrl) {
-      // Mode 2: Use pre-signed token from x402 gateway
+      // Mode 3: Use pre-signed token from x402 gateway
       jwt = options.token;
       wsUrl = options.wsUrl;
-    } else if (options.apiKey && options.apiSecret) {
-      // Mode 1: Generate token from credentials
-      const { AccessToken } = await import('@dtelecom/server-sdk-js');
-
-      const token = new AccessToken(options.apiKey, options.apiSecret, {
-        identity,
-        name: name ?? identity,
-      });
-      token.addGrant({
-        roomJoin: true,
-        room: roomName,
-        canPublish: true,
-        canSubscribe: true,
-        canPublishData: true,
-      });
-
-      wsUrl = await token.getWsUrl();
-      jwt = token.toJwt();
+    } else if (options.cloud || (options.apiKey && options.apiSecret)) {
+      // Modes 1 and 2: dTelecom Cloud. Default grants: publish, subscribe and data.
+      let cloud = options.cloud;
+      if (!cloud) {
+        const { CloudClient } = await import('@dtelecom/server-sdk-js');
+        cloud = new CloudClient({ apiKey: options.apiKey, apiSecret: options.apiSecret });
+      }
+      const issued = await cloud.createToken({ room: roomName, identity, name: name ?? identity, ttl: options.ttl });
+      jwt = issued.token;
+      wsUrl = issued.wsUrl;
+      this.webrtcSessionId = issued.sessionId;
     } else {
-      throw new Error('Either (apiKey + apiSecret) or (token + wsUrl) must be provided');
+      throw new Error('Either cloud, (apiKey + apiSecret) or (token + wsUrl) must be provided');
     }
 
     log.info(`SFU URL: ${wsUrl}`);

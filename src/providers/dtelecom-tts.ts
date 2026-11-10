@@ -14,9 +14,16 @@
  * - Per-message voice/language switching instead of separate connections
  * - Server outputs 48kHz PCM16 (resampled from Kokoro's native 24kHz)
  * - Uses legacy <lang> tags to route text segments to correct voice (same as DeepgramTTS)
+ *
+ * Two ways to authorise: a fixed `serverUrl` + `sessionKey` (x402), or `cloud`, a dTelecom Cloud
+ * client. With `cloud`, the first connection opens a TTS session linked to the agent's WebRTC
+ * session; characters are reserved before each text is sent, and the session is extended with
+ * {"type":"extend","session_key":"..."} on the open socket.
  */
 
 import WebSocket from 'ws';
+import type { CloudClient } from '@dtelecom/server-sdk-js';
+import { CloudSpeechSession, type CloudTTSSessionOptions } from './cloud-speech-session';
 import { parseLangSegments } from './deepgram-tts';
 import type { TTSPlugin } from '../core/types';
 import { createLogger } from '../utils/logger';
@@ -30,10 +37,14 @@ export interface VoiceConfig {
 }
 
 export interface DtelecomTTSOptions {
-  /** Server base URL, e.g. "https://tts-xxx.dtel.network" */
-  serverUrl: string;
+  /** dTelecom Cloud client: opens and extends a TTS session. Instead of serverUrl + sessionKey. */
+  cloud?: CloudClient;
+  /** Cloud mode: how many characters each hold covers and when it is extended. */
+  cloudSession?: CloudTTSSessionOptions;
+  /** Server base URL, e.g. "https://tts-xxx.dtel.network" (x402) */
+  serverUrl?: string;
   /** JWT session key from x402 gateway */
-  sessionKey: string;
+  sessionKey?: string;
   /** Voice config per language: { en: { voice: "af_heart", langCode: "a" }, es: { voice: "ef_dora", langCode: "e" } } */
   voices: Record<string, VoiceConfig>;
   /** Default language code (default: "en") */
@@ -56,8 +67,13 @@ interface FlushState {
 }
 
 export class DtelecomTTS implements TTSPlugin {
-  private readonly serverUrl: string;
-  private readonly sessionKey: string;
+  private serverUrl: string;
+  private sessionKey: string;
+  private readonly cloud: CloudClient | undefined;
+  private readonly cloudOptions: CloudTTSSessionOptions | undefined;
+  private cloudSession: CloudSpeechSession | null = null;
+  private cloudReady: Promise<void> | null = null;
+  private webrtcSessionId: string | undefined;
   private readonly voices: Record<string, VoiceConfig>;
   private readonly defaultLang: string;
   private readonly speed: number;
@@ -77,18 +93,22 @@ export class DtelecomTTS implements TTSPlugin {
   }
 
   constructor(options: DtelecomTTSOptions) {
-    if (!options.serverUrl) {
-      throw new Error('DtelecomTTS requires a serverUrl');
-    }
-    if (!options.sessionKey) {
-      throw new Error('DtelecomTTS requires a sessionKey');
+    if (!options.cloud) {
+      if (!options.serverUrl) {
+        throw new Error('DtelecomTTS requires a serverUrl (or cloud)');
+      }
+      if (!options.sessionKey) {
+        throw new Error('DtelecomTTS requires a sessionKey (or cloud)');
+      }
     }
     if (!options.voices || Object.keys(options.voices).length === 0) {
       throw new Error('DtelecomTTS requires at least one voice config');
     }
 
-    this.serverUrl = options.serverUrl;
-    this.sessionKey = options.sessionKey;
+    this.serverUrl = options.serverUrl ?? '';
+    this.sessionKey = options.sessionKey ?? '';
+    this.cloud = options.cloud;
+    this.cloudOptions = options.cloudSession;
     this.voices = { ...options.voices };
     this.defaultLang = options.defaultLanguage ?? Object.keys(this.voices)[0];
     this.speed = options.speed ?? 1.0;
@@ -96,6 +116,11 @@ export class DtelecomTTS implements TTSPlugin {
       throw new Error('watermark must be a boolean');
     }
     this.watermark = options.watermark === true;
+  }
+
+  /** Cloud mode: links the TTS session to the agent's WebRTC session. Called by VoiceAgent. */
+  setWebRTCSessionId(sessionId: string): void {
+    this.webrtcSessionId = sessionId;
   }
 
   /** Pre-connect WebSocket to TTS server. */
@@ -111,8 +136,11 @@ export class DtelecomTTS implements TTSPlugin {
     }
   }
 
-  /** Close WebSocket connection. */
+  /** Close WebSocket connection. In cloud mode the session ends too; later use opens a new one. */
   close(): void {
+    this.cloudSession?.close();
+    this.cloudSession = null;
+    this.cloudReady = null;
     if (this.ws) {
       log.debug('Closing TTS WebSocket');
       this.ws.close();
@@ -230,6 +258,9 @@ export class DtelecomTTS implements TTSPlugin {
 
     await this.ensureConnection();
     if (signal?.aborted) return;
+    // Cloud mode: extend before this text would pass the session's character limit.
+    await this.cloudSession?.reserveCharacters(billableCharacters(text, inputFormat));
+    if (signal?.aborted) return;
 
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -333,10 +364,44 @@ export class DtelecomTTS implements TTSPlugin {
     }
   }
 
+  /** Cloud mode: opens the TTS session once; reconnects keep using its current key. */
+  private ensureCloudSession(): Promise<void> {
+    if (!this.cloud) return Promise.resolve();
+    if (!this.cloudReady) {
+      const voice = this.voices[this.defaultLang]?.voice;
+      const session = new CloudSpeechSession({
+        kind: 'tts',
+        cloud: this.cloud,
+        language: this.defaultLang,
+        voice,
+        tts: this.cloudOptions,
+        onExtended: (sessionKey) => {
+          this.sessionKey = sessionKey;
+          if (this.ws?.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: 'extend', session_key: sessionKey }));
+          }
+        },
+        onError: (error) => log.error('Cloud TTS session extension failed:', error),
+      });
+      this.cloudReady = session.open(this.webrtcSessionId).then(() => {
+        this.cloudSession = session;
+        this.serverUrl = session.serverUrl;
+        this.sessionKey = session.token;
+      }, (err) => {
+        this.cloudReady = null;
+        throw err;
+      });
+    }
+    return this.cloudReady;
+  }
+
   /** Ensure a WebSocket connection exists and is open. */
   private ensureConnection(): Promise<void> {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return Promise.resolve();
+    }
+    if (this.cloud && !this.cloudSession) {
+      return this.ensureCloudSession().then(() => this.ensureConnection());
     }
 
     // Deduplicate concurrent connection attempts
@@ -456,4 +521,9 @@ export class DtelecomTTS implements TTSPlugin {
 
     return this.connectPromise;
   }
+}
+
+/** Characters the server counts for a text: Unicode code points, plain text trimmed. */
+function billableCharacters(text: string, inputFormat: 'text' | 'ssml'): number {
+  return Array.from(inputFormat === 'ssml' ? text : text.trim()).length;
 }

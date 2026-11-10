@@ -18,3 +18,4 @@ export type { DtelecomSTTOptions } from './dtelecom-stt';
 
 export { DtelecomTTS } from './dtelecom-tts';
 export type { DtelecomTTSOptions, VoiceConfig as DtelecomVoiceConfig } from './dtelecom-tts';
+export type { CloudSTTSessionOptions, CloudTTSSessionOptions } from './cloud-speech-session';

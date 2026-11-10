@@ -29,13 +29,14 @@ import {
   LocalAudioTrack,
   TrackSource,
 } from '@dtelecom/server-sdk-node';
-import { AccessToken } from '@dtelecom/server-sdk-js';
+import { CloudClient } from '@dtelecom/server-sdk-js';
 
 // ─── Config (from .env) ─────────────────────────────────────────────────────
 
 const required = [
   'DTELECOM_API_KEY',
   'DTELECOM_API_SECRET',
+  'DTELECOM_CLOUD_URL',
   'DEEPGRAM_API_KEY',
   'OPENROUTER_API_KEY',
   'CARTESIA_API_KEY',
@@ -149,20 +150,10 @@ async function main(): Promise<void> {
   log('HUMAN', 'Connecting human simulator...');
   const humanRoom = new Room();
 
-  const humanToken = new AccessToken(DTELECOM_API_KEY, DTELECOM_API_SECRET, {
-    identity: 'e2e-human',
-    name: 'E2E Human',
-  });
-  humanToken.addGrant({
-    roomJoin: true,
-    room: ROOM_NAME,
-    canPublish: true,
-    canSubscribe: true,
-  });
-
-  const humanWsUrl = await humanToken.getWsUrl();
-  const humanJwt = humanToken.toJwt();
-  await humanRoom.connect(humanWsUrl, humanJwt, { autoSubscribe: true });
+  // dTelecom Cloud issues the token; the base URL comes from DTELECOM_CLOUD_URL.
+  const cloud = new CloudClient({ apiKey: DTELECOM_API_KEY, apiSecret: DTELECOM_API_SECRET });
+  const human = await cloud.createToken({ room: ROOM_NAME, identity: 'e2e-human', name: 'E2E Human' });
+  await humanRoom.connect(human.wsUrl, human.token, { autoSubscribe: true });
   log('HUMAN', 'Connected to room');
 
   // Publish human audio track

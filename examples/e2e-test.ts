@@ -28,6 +28,7 @@ import { CartesiaTTS } from '../src/providers/cartesia-tts';
 const required = [
   'DTELECOM_API_KEY',
   'DTELECOM_API_SECRET',
+  'DTELECOM_CLOUD_URL',
   'DEEPGRAM_API_KEY',
   'OPENROUTER_API_KEY',
   'CARTESIA_API_KEY',

@@ -54,7 +54,38 @@ await agent.start({
 });
 ```
 
-## dTelecom gateway speech
+`apiKey` and `apiSecret` are a dTelecom Cloud project's API key; the agent's token comes from the cloud at `DTELECOM_CLOUD_URL`. Pass `cloud` instead to reuse a client (see below).
+
+## dTelecom Cloud speech (0.7.0+)
+
+With a dTelecom Cloud project, give the agent and the dTelecom providers one `CloudClient` from `@dtelecom/server-sdk-js` 4.1 or newer. The agent mints its own WebRTC token; the providers open their speech sessions, link them to the agent's room session, and extend them before they run out.
+
+```ts
+import { CloudClient } from '@dtelecom/server-sdk-js';
+import { VoiceAgent } from '@dtelecom/agents-js';
+import { DtelecomSTT, DtelecomTTS } from '@dtelecom/agents-js/providers';
+
+// DTELECOM_API_KEY, DTELECOM_API_SECRET and DTELECOM_CLOUD_URL from the environment
+const cloud = new CloudClient();
+
+const agent = new VoiceAgent({
+  stt: new DtelecomSTT({ cloud, language: 'en', partials: true, smartTurn: true }),
+  tts: new DtelecomTTS({ cloud, voices: { en: { voice: 'af_heart', langCode: 'a' } } }),
+  llm, instructions: 'Be helpful and concise.',
+});
+await agent.start({ room: 'voice-demo', identity: 'assistant', cloud, ttl: '2h' });
+```
+
+Your backend gives each human participant a token with `cloud.createToken`. How the sessions work:
+
+- **STT**: one session per participant stream, billed per connected minute. Each holds 10 minutes of balance and is extended by 10 minutes when under 2 remain. Change it with `cloudSession: { minutes, extendWhenMinutesLeft }`.
+- **TTS**: one session for the agent's voice, billed per character. It holds 2,000 characters and is extended before a sentence would leave fewer than 500, and before its 30-minute window closes. Change it with `cloudSession: { characters, extendWhenCharactersLeft }`.
+- Unused holds are released when a session ends. An extension sends the new key to the open socket; a reconnect uses the latest key. A session the cloud refuses (for example `insufficient_balance`) surfaces as an `error` event.
+- `ttl` sets the agent's own room session (default 6 hours, at most 24).
+
+Rates are in the dashboard's billing catalog: STT $0.004 per connected minute, TTS $0.006 per 1,000 characters, WebRTC audio $0.0001 per participant minute. File transcription, WAV synthesis, translation, vision and moderation are on `CloudClient` itself; VoiceAgent does not call them.
+
+## dTelecom gateway speech (x402)
 
 Create a prepaid bundle with `DtelecomGateway` from `@dtelecom/x402-client`, then pass its tokens to the providers. This example assumes `gateway` is configured with a funded wallet and `llm` implements the LLM plugin interface:
 

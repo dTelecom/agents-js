@@ -45,6 +45,8 @@ export interface STTStream {
 
 export interface STTPlugin {
   createStream(options?: STTStreamOptions): STTStream;
+  /** Optional: dTelecom Cloud providers link their sessions to the agent's WebRTC session. */
+  setWebRTCSessionId?(sessionId: string): void;
 }
 
 // ─── LLM Plugin ──────────────────────────────────────────────────────────────
@@ -106,6 +108,8 @@ export interface TTSPlugin {
   close?(): void;
   /** When true, pipeline will not prefetch next sentence TTS (single-connection providers). */
   sequential?: boolean;
+  /** Optional: dTelecom Cloud providers link their sessions to the agent's WebRTC session. */
+  setWebRTCSessionId?(sessionId: string): void;
 }
 
 // ─── Memory Config ───────────────────────────────────────────────────────────
@@ -149,11 +153,16 @@ export interface AgentStartOptions {
   identity?: string;
   name?: string;
 
-  // Mode 1: Generate token from credentials (existing)
+  // Mode 1: dTelecom Cloud — the cloud mints the agent's token (publish, subscribe and data)
+  cloud?: import('@dtelecom/server-sdk-js').CloudClient;
+  /** Cloud mode: the agent's session lifetime, e.g. '6h' (default 6 hours, at most 24). */
+  ttl?: number | string;
+
+  // Mode 2: dTelecom Cloud API key and secret; builds a CloudClient (base URL from DTELECOM_CLOUD_URL)
   apiKey?: string;
   apiSecret?: string;
 
-  // Mode 2: Use pre-signed token from x402 gateway
+  // Mode 3: Use pre-signed token from x402 gateway
   token?: string;
   wsUrl?: string;
 }

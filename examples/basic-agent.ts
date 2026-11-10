@@ -2,7 +2,7 @@
  * Basic voice agent example.
  *
  * Usage:
- *   DTELECOM_API_KEY=... DTELECOM_API_SECRET=... \
+ *   DTELECOM_API_KEY=... DTELECOM_API_SECRET=... DTELECOM_CLOUD_URL=https://cloud.dtelecom.org \
  *   DEEPGRAM_API_KEY=... OPENROUTER_API_KEY=... CARTESIA_API_KEY=... \
  *   npx tsx examples/basic-agent.ts
  */

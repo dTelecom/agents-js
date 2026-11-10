@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0 — 2026-11-10
+
+- Add dTelecom Cloud mode. `agent.start({ cloud })` mints the agent's WebRTC token through a `CloudClient`; `{ apiKey, apiSecret }` now builds one from `DTELECOM_CLOUD_URL` instead of signing locally, which `@dtelecom/server-sdk-js` 4.0 removed. Optional `ttl` sets the agent's session lifetime.
+- `DtelecomSTT({ cloud })` opens one STT session per participant stream and `DtelecomTTS({ cloud })` one TTS session, both linked to the agent's room session. Sessions hold small chunks (10 minutes; 2,000 characters), are extended before they run out with `{ type: "extend", session_key }` on the open socket, and reconnects use the latest key. `cloudSession` changes the chunk sizes.
+- Peer dependency `@dtelecom/server-sdk-js` is now `>=4.1.0`. The x402 modes (`token` + `wsUrl`, `serverUrl` + `sessionKey`) are unchanged.
+
 ## 0.6.2 — 2026-10-27
 
 - Publish corrected gateway pricing and the 367-character voice-agent usage example in the npm README. Documentation-only release; runtime behavior is unchanged.
