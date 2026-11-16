@@ -155,7 +155,10 @@ export interface AgentStartOptions {
 
   // Mode 1: dTelecom Cloud — the cloud mints the agent's token (publish, subscribe and data)
   cloud?: import('@dtelecom/server-sdk-js').CloudClient;
-  /** Cloud mode: the agent's session lifetime, e.g. '6h' (default 6 hours, at most 24). */
+  /**
+   * Cloud mode: how long each room token holds, e.g. '6h' (default 6 hours, at most 24). The agent
+   * extends it by the same amount before it expires, so it stays until stop().
+   */
   ttl?: number | string;
 
   // Mode 2: dTelecom Cloud API key and secret; builds a CloudClient (base URL from DTELECOM_CLOUD_URL)

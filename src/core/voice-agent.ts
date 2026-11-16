@@ -108,6 +108,7 @@ export class VoiceAgent extends EventEmitter {
       wsUrl: options.wsUrl,
       identity: options.identity ?? 'agent',
       name: options.name ?? options.identity ?? 'AI Agent',
+      onError: (error) => this.emit('error', error),
     });
 
     // Cloud mode: speech sessions opened from now on are linked to the agent's room session.

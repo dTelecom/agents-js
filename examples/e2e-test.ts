@@ -100,8 +100,8 @@ agent.on('response', (text) => {
   }
 });
 
-agent.on('speaking', (isSpeaking) => {
-  console.log(`[Speaking] ${isSpeaking ? 'started' : 'stopped'}`);
+agent.on('agentState', (state) => {
+  console.log(`[State] ${state}`);
 });
 
 agent.on('error', (error) => {

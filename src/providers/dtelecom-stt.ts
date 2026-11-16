@@ -16,11 +16,15 @@
  * Two ways to authorise: a fixed `serverUrl` + `sessionKey` (x402), or `cloud`, a dTelecom Cloud
  * client. With `cloud`, every stream (one per participant) opens its own STT session, linked to
  * the agent's WebRTC session, and extends it before it runs out.
+ *
+ * A session key serves one connection. After a disconnect, cloud mode opens a new session; x402
+ * mode asks `getSessionKey` for a new key, or reports an error and stops without it.
  */
 
 import WebSocket from 'ws';
 import type { CloudClient } from '@dtelecom/server-sdk-js';
 import { CloudSpeechSession, type CloudSTTSessionOptions } from './cloud-speech-session';
+import { toStreamUrl, type SessionKeyRefresh } from './stream-url';
 import { BaseSTTStream } from '../core/base-stt-stream';
 import type { STTPlugin, STTStream, STTStreamOptions, TranscriptionResult, STTPartialEnd } from '../core/types';
 import { createLogger } from '../utils/logger';
@@ -28,6 +32,10 @@ import { createLogger } from '../utils/logger';
 const log = createLogger('DtelecomSTT');
 
 const KEEPALIVE_INTERVAL_MS = 5_000;
+/** Audio kept while (re)connecting: 5 s of 16 kHz PCM16; the oldest is dropped first. */
+const MAX_PENDING_BYTES = 5 * 16_000 * 2;
+const RECONNECT_FIRST_MS = 1_000;
+const RECONNECT_MAX_MS = 30_000;
 
 export interface DtelecomSTTOptions {
   /** dTelecom Cloud client: each stream gets its own STT session. Instead of serverUrl + sessionKey. */
@@ -38,6 +46,11 @@ export interface DtelecomSTTOptions {
   serverUrl?: string;
   /** JWT session key from x402 gateway */
   sessionKey?: string;
+  /**
+   * x402 mode: returns a new session key for a reconnect (a key serves one connection). Without
+   * it, a lost connection is reported as an error and not retried.
+   */
+  getSessionKey?: () => Promise<SessionKeyRefresh>;
   /** Initial language (default: "auto" for Parakeet auto-detect) */
   language?: string;
   /** Force Whisper model even if Parakeet supports the language */
@@ -86,10 +99,16 @@ class DtelecomSTTStream extends BaseSTTStream {
   private _ready = false;
   private _closed = false;
   private pendingAudio: Buffer[] = [];
+  private pendingBytes = 0;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  private reconnectAttempts = 0;
   private language: string;
 
-  constructor(options: DtelecomSTTOptions, language: string, webrtcSessionId?: string) {
+  constructor(
+    private readonly options: DtelecomSTTOptions,
+    language: string,
+    private readonly webrtcSessionId?: string,
+  ) {
     super();
     this.serverUrl = options.serverUrl ?? '';
     this.sessionKey = options.sessionKey ?? '';
@@ -102,25 +121,68 @@ class DtelecomSTTStream extends BaseSTTStream {
       return;
     }
     // Audio sent before the session is ready waits in pendingAudio, as during any connect.
-    this.cloudSession = new CloudSpeechSession({
+    this.openCloudSession();
+  }
+
+  /** Cloud mode: opens a new STT session (in the current language) and connects with its key. */
+  private openCloudSession(): void {
+    this.cloudSession?.close();
+    const session = new CloudSpeechSession({
       kind: 'stt',
-      cloud: options.cloud,
-      language,
-      stt: options.cloudSession,
+      cloud: this.options.cloud!,
+      language: this.language,
+      stt: this.options.cloudSession,
       onExtended: (sessionKey) => this.sendExtension(sessionKey),
       onError: (error) => this.emit('error', error),
     });
-    this.cloudSession.open(webrtcSessionId).then(() => {
-      if (this._closed) {
-        this.cloudSession?.close();
+    this.cloudSession = session;
+    session.open(this.webrtcSessionId).then(() => {
+      if (this._closed || this.cloudSession !== session) {
+        session.close();
         return;
       }
-      this.serverUrl = this.cloudSession!.serverUrl;
-      this.sessionKey = this.cloudSession!.token;
+      this.serverUrl = session.streamUrl;
+      this.sessionKey = session.token;
       this.connect();
     }, (err) => {
+      if (this._closed) return;
       log.error('Cloud STT session failed:', err);
       this.emit('error', err instanceof Error ? err : new Error(String(err)));
+      this.scheduleReconnect();
+    });
+  }
+
+  /** After a lost connection: a new session key, then connect; backoff 1 s doubling to 30 s. */
+  private scheduleReconnect(): void {
+    const delay = Math.min(RECONNECT_FIRST_MS * 2 ** this.reconnectAttempts, RECONNECT_MAX_MS);
+    this.reconnectAttempts++;
+    log.info(`dTelecom STT reconnecting in ${delay}ms...`);
+    setTimeout(() => {
+      if (!this._closed) this.reconnect();
+    }, delay).unref?.();
+  }
+
+  private reconnect(): void {
+    if (this.options.cloud) {
+      this.openCloudSession();
+      return;
+    }
+    const getSessionKey = this.options.getSessionKey;
+    if (!getSessionKey) {
+      this.emit('error', new Error(
+        'dTelecom STT connection lost: a session key serves one connection; pass getSessionKey to reconnect',
+      ));
+      return;
+    }
+    getSessionKey().then(({ sessionKey, serverUrl }) => {
+      if (this._closed) return;
+      this.sessionKey = sessionKey;
+      if (serverUrl) this.serverUrl = serverUrl;
+      this.connect();
+    }, (err) => {
+      if (this._closed) return;
+      this.emit('error', err instanceof Error ? err : new Error(String(err)));
+      this.scheduleReconnect();
     });
   }
 
@@ -137,6 +199,10 @@ class DtelecomSTTStream extends BaseSTTStream {
 
     if (!this._ready) {
       this.pendingAudio.push(pcm16);
+      this.pendingBytes += pcm16.length;
+      while (this.pendingBytes > MAX_PENDING_BYTES && this.pendingAudio.length > 1) {
+        this.pendingBytes -= this.pendingAudio.shift()!.length;
+      }
       return;
     }
 
@@ -169,6 +235,7 @@ class DtelecomSTTStream extends BaseSTTStream {
     this._closed = true;
     this._ready = false;
     this.pendingAudio = [];
+    this.pendingBytes = 0;
     this.stopKeepAlive();
     this.cloudSession?.close();
 
@@ -181,16 +248,7 @@ class DtelecomSTTStream extends BaseSTTStream {
   }
 
   private connect(): void {
-    // Use /v1/stream auth path, convert https:// to wss://
-    const url = new URL(this.serverUrl);
-    if (url.protocol === 'https:') url.protocol = 'wss:';
-    else if (url.protocol === 'http:') url.protocol = 'ws:';
-    if (!['ws:', 'wss:'].includes(url.protocol) || !['/', '/v1/stream'].includes(url.pathname)) {
-      throw new Error('Invalid dTelecom STT server URL');
-    }
-    url.pathname = '/v1/stream';
-    url.hash = '';
-    const wsUrl = url.toString();
+    const wsUrl = toStreamUrl(this.serverUrl);
 
     log.debug(`Connecting to dTelecom STT: ${wsUrl}`);
 
@@ -232,12 +290,10 @@ class DtelecomSTTStream extends BaseSTTStream {
       this._ready = false;
       this.stopKeepAlive();
 
-      // Reconnect if not intentionally closed
+      // Reconnect with a new session key unless closed on purpose: a key serves one connection.
       if (!this._closed) {
-        log.info('dTelecom STT connection lost, reconnecting in 1s...');
-        setTimeout(() => {
-          if (!this._closed) this.connect();
-        }, 1000);
+        log.info('dTelecom STT connection lost');
+        this.scheduleReconnect();
       }
     });
   }
@@ -286,6 +342,7 @@ class DtelecomSTTStream extends BaseSTTStream {
     log.info(`dTelecom STT ready: client_id=${clientId}, language=${lang}`);
 
     this._ready = true;
+    this.reconnectAttempts = 0;
     this.emit('ready', {
       clientId, language: lang,
       ...(msg.smart_turn === 'active' || msg.smart_turn === 'acoustic_fallback'
@@ -299,6 +356,7 @@ class DtelecomSTTStream extends BaseSTTStream {
       }
     }
     this.pendingAudio = [];
+    this.pendingBytes = 0;
 
     this.startKeepAlive();
   }

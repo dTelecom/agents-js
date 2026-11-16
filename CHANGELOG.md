@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 — 2026-11-16
+
+- The agent keeps its room: in cloud mode it extends its own WebRTC token by `ttl` before the token expires (10 minutes before, or at half its life for short tokens), since dTelecom Cloud now removes a participant a minute after an unextended token expires. A failed extension surfaces as an `error` event; a refused payment is retried every 15 s until the token's grace ends; `session_not_extendable` is reported once.
+- A speech session key serves one connection. After a disconnect, `DtelecomSTT` and `DtelecomTTS` in cloud mode open a new session (STT in its current language, with backoff from 1 s to 30 s) instead of reusing the key. In x402 mode pass `getSessionKey` to supply a new key; without it a lost connection is reported as an `error` instead of reconnecting with the used key.
+- Speech streams connect to the cloud's `stream_url` when it is given (`@dtelecom/server-sdk-js` 4.2), else to `serverUrl` + `/v1/stream`. TTS now accepts a server URL that already ends in `/v1/stream`.
+- STT keeps at most 5 s of audio while it connects; the oldest is dropped first.
+- README: the events table lists `agentState`, `sentence` and `toolCall`; `speaking` was never emitted. Examples import `@dtelecom/agents-js`.
+
 ## 0.7.0 — 2026-11-10
 
 - Add dTelecom Cloud mode. `agent.start({ cloud })` mints the agent's WebRTC token through a `CloudClient`; `{ apiKey, apiSecret }` now builds one from `DTELECOM_CLOUD_URL` instead of signing locally, which `@dtelecom/server-sdk-js` 4.0 removed. Optional `ttl` sets the agent's session lifetime.

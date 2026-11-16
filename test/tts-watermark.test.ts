@@ -24,6 +24,7 @@ async function fixture(option?: boolean, supported: unknown = true, confirmation
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('Missing port');
   const tts = new DtelecomTTS({ serverUrl: `http://127.0.0.1:${address.port}`, sessionKey: 'test',
+    getSessionKey: async () => ({ sessionKey: 'test-next' }),
     voices: { en: { voice: 'M5', langCode: 'en' } }, watermark: option });
   return { tts, messages, async close() {
     tts.close(); for (const ws of server.clients) ws.terminate();

@@ -80,8 +80,8 @@ Your backend gives each human participant a token with `cloud.createToken`. How 
 
 - **STT**: one session per participant stream, billed per connected minute. Each holds 10 minutes of balance and is extended by 10 minutes when under 2 remain. Change it with `cloudSession: { minutes, extendWhenMinutesLeft }`.
 - **TTS**: one session for the agent's voice, billed per character. It holds 2,000 characters and is extended before a sentence would leave fewer than 500, and before its 30-minute window closes. Change it with `cloudSession: { characters, extendWhenCharactersLeft }`.
-- Unused holds are released when a session ends. An extension sends the new key to the open socket; a reconnect uses the latest key. A session the cloud refuses (for example `insufficient_balance`) surfaces as an `error` event.
-- `ttl` sets the agent's own room session (default 6 hours, at most 24).
+- Unused holds are released when a session ends. An extension sends the new key to the open socket. A session key serves one connection: after a disconnect the provider opens a new session. A session the cloud refuses (for example `insufficient_balance`) surfaces as an `error` event.
+- `ttl` sets how long the agent's room token holds (default 6 hours, at most 24). The agent extends it by the same amount before it expires, so it stays until `stop()`; the cloud removes a participant a minute after an unextended token expires. A failed extension surfaces as an `error` event.
 
 Rates are in the dashboard's billing catalog: STT $0.004 per connected minute, TTS $0.006 per 1,000 characters, WebRTC audio $0.0001 per participant minute. File transcription, WAV synthesis, translation, vision and moderation are on `CloudClient` itself; VoiceAgent does not call them.
 
@@ -112,6 +112,8 @@ const agent = new VoiceAgent({
 });
 await agent.start({ room: 'voice-demo', token: session.webrtc.agent.token, wsUrl: session.webrtc.agent.wsUrl });
 ```
+
+A gateway session key serves one connection. To let the providers reconnect after a network drop, pass `getSessionKey: async () => ({ sessionKey, serverUrl })`, returning a new key from your gateway session; without it, a lost connection surfaces as an `error` event.
 
 The client joins with `session.webrtc.client`. STT is $0.004/connected session minute; TTS is $0.006/1,000 spoken Unicode code points; WebRTC is $0.0001/audio participant minute. Two participants, one STT session and 367 TTS characters/minute cost approximately $0.0064/minute, excluding LLM charges. [Live pricing and enabled services](https://x402.dtelecom.org/v1/pricing).
 
@@ -200,9 +202,11 @@ Smart Turn defaults to off. Current server defaults are completion threshold 0.5
 | `transcription_partial` | `{ text, utteranceId, revision, windowStartSeconds, speaker }` | Replace temporary display text |
 | `partial_end` | `{ utteranceId, reason, speaker }` | Clear temporary display text |
 | `stt_ready` | `{ clientId?, language?, smartTurn?, speaker }` | Check active/fallback endpointing |
+| `sentence` | `string` | A sentence finished playing |
 | `response` | `string` | Full agent response text |
-| `speaking` | `boolean` | Agent started/stopped speaking |
-| `error` | `Error` | Pipeline error |
+| `agentState` | `'idle' \| 'listening' \| 'thinking' \| 'speaking'` | Agent state changed |
+| `toolCall` | `ToolCallResult` | The LLM invoked a tool |
+| `error` | `Error` | Pipeline, speech session or token extension error |
 | `connected` | — | Agent connected to room |
 | `disconnected` | `string?` | Agent disconnected |
 

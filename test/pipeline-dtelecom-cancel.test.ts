@@ -57,6 +57,7 @@ describe('Pipeline with the real dTelecom TTS transport', () => {
     if (!address || typeof address === 'string') throw new Error('Missing test address');
     const tts = new DtelecomTTS({
       serverUrl: `http://127.0.0.1:${address.port}`, sessionKey: 'test-only',
+      getSessionKey: async () => ({ sessionKey: 'test-only-next' }),
       voices: { en: { voice: 'M5', langCode: 'en' } }, defaultLanguage: 'en',
     });
     const stt = new MockSTT();
@@ -121,6 +122,7 @@ describe('Pipeline with the real dTelecom TTS transport', () => {
     if (!address || typeof address === 'string') throw new Error('Missing test address');
     const tts = new DtelecomTTS({
       serverUrl: `http://127.0.0.1:${address.port}`, sessionKey: 'test-only',
+      getSessionKey: async () => ({ sessionKey: 'test-only-next' }),
       voices: { en: { voice: 'M5', langCode: 'en' } },
     });
     try {

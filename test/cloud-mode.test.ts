@@ -34,8 +34,11 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-/** A cloud that records calls; sessions point at `serverUrl` and expire after `ttlMs`. */
-function fakeCloud(serverUrl = 'https://speech.example', ttlMs = 10 * 60_000) {
+/**
+ * A cloud that records calls; sessions point at `serverUrl` and expire after `ttlMs`; the agent's
+ * token lasts `tokenTtlMs`.
+ */
+function fakeCloud(serverUrl = 'https://speech.example', ttlMs = 10 * 60_000, tokenTtlMs = 2 * 3_600_000) {
   const calls: Array<[string, any]> = [];
   let n = 0;
   const session = (kind: string, options: any) => {
@@ -62,7 +65,11 @@ function fakeCloud(serverUrl = 'https://speech.example', ttlMs = 10 * 60_000) {
     },
     createToken: vi.fn(async (o: any) => {
       calls.push(['createToken', o]);
-      return { token: 'agent-token', wsUrl: 'wss://node.example', sessionId: 'webrtc-1', expiresAt: new Date() };
+      return { token: 'agent-token', wsUrl: 'wss://node.example', sessionId: 'webrtc-1', expiresAt: new Date(Date.now() + tokenTtlMs) };
+    }),
+    extendToken: vi.fn(async (id: string, seconds: number) => {
+      calls.push(['extendToken', { id, seconds }]);
+      return { token: `agent-token-${calls.length}`, wsUrl: 'wss://node.example', expiresAt: new Date(Date.now() + seconds * 1000) };
     }),
   };
   return { cloud: cloud as unknown as CloudClient, calls };
@@ -88,7 +95,9 @@ async function speechServer(onMessage?: (ws: any, message: any) => void) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
   const { port } = server.address() as AddressInfo;
-  return { url: `http://127.0.0.1:${port}`, connections };
+  /** Drops every open connection; the server keeps listening. */
+  const drop = () => { for (const ws of server.clients) ws.terminate(); };
+  return { url: `http://127.0.0.1:${port}`, connections, drop };
 }
 
 describe('CloudSpeechSession', () => {
@@ -283,5 +292,170 @@ describe('VoiceAgent in cloud mode', () => {
     } finally {
       await agent.stop();
     }
+  });
+});
+
+describe('the agent token in cloud mode', () => {
+  const minute = 60_000;
+  const fake = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  const cloudError = (status: number, code: string) => Object.assign(new Error(code), { status, code });
+
+  it('extends by its ttl ten minutes before it expires, again and again', async () => {
+    fake();
+    const { cloud, calls } = fakeCloud();
+    const connection = new RoomConnection();
+    await connection.connect({ room: 'demo', cloud, ttl: '2h' });
+    cleanups.push(() => connection.disconnect());
+
+    await vi.advanceTimersByTimeAsync(110 * minute - 1);
+    expect(calls.filter(([name]) => name === 'extendToken')).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls.filter(([name]) => name === 'extendToken')).toEqual([['extendToken', { id: 'webrtc-1', seconds: 7200 }]]);
+    expect(connection.token).toMatch(/^agent-token-/);
+
+    await vi.advanceTimersByTimeAsync(120 * minute);
+    expect(calls.filter(([name]) => name === 'extendToken')).toHaveLength(2);
+  });
+
+  it('extends a short token at half its life', async () => {
+    fake();
+    const { cloud, calls } = fakeCloud('https://speech.example', 10 * minute, 10 * minute);
+    const connection = new RoomConnection();
+    await connection.connect({ room: 'demo', cloud, ttl: '10m' });
+    cleanups.push(() => connection.disconnect());
+    await vi.advanceTimersByTimeAsync(5 * minute);
+    expect(calls.filter(([name]) => name === 'extendToken')).toEqual([['extendToken', { id: 'webrtc-1', seconds: 600 }]]);
+  });
+
+  it('retries a refused payment every 15 s and reports the failure once', async () => {
+    fake();
+    const { cloud } = fakeCloud();
+    (cloud.extendToken as any)
+      .mockRejectedValueOnce(cloudError(402, 'insufficient_balance'))
+      .mockRejectedValueOnce(cloudError(402, 'insufficient_balance'));
+    const errors: Error[] = [];
+    const connection = new RoomConnection();
+    await connection.connect({ room: 'demo', cloud, ttl: '2h', onError: (e) => errors.push(e) });
+    cleanups.push(() => connection.disconnect());
+
+    await vi.advanceTimersByTimeAsync(110 * minute);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(cloud.extendToken).toHaveBeenCalledTimes(3);
+    expect(errors.map((e) => e.message)).toEqual(['insufficient_balance']);
+    expect(connection.token).toMatch(/^agent-token-/);
+  });
+
+  it('stops after the expiry and its grace while the payment keeps failing', async () => {
+    fake();
+    const { cloud } = fakeCloud();
+    (cloud.extendToken as any).mockRejectedValue(cloudError(402, 'insufficient_balance'));
+    const errors: Error[] = [];
+    const connection = new RoomConnection();
+    await connection.connect({ room: 'demo', cloud, ttl: '2h', onError: (e) => errors.push(e) });
+    cleanups.push(() => connection.disconnect());
+
+    await vi.advanceTimersByTimeAsync(125 * minute);
+    const tries = (cloud.extendToken as any).mock.calls.length;
+    // 10 minutes before expiry plus up to 50 s after it, every 15 s.
+    expect(tries).toBeGreaterThan(40);
+    expect(tries).toBeLessThan(46);
+    expect(errors).toHaveLength(2); // the first failure, and the last one that gives up
+  });
+
+  it('reports a session past its expiry once and does not retry', async () => {
+    fake();
+    const { cloud } = fakeCloud();
+    (cloud.extendToken as any).mockRejectedValue(cloudError(409, 'session_not_extendable'));
+    const errors: Error[] = [];
+    const connection = new RoomConnection();
+    await connection.connect({ room: 'demo', cloud, ttl: '2h', onError: (e) => errors.push(e) });
+    cleanups.push(() => connection.disconnect());
+    await vi.advanceTimersByTimeAsync(130 * minute);
+    expect(cloud.extendToken).toHaveBeenCalledTimes(1);
+    expect(errors.map((e) => e.message)).toEqual(['session_not_extendable']);
+  });
+
+  it('stops extending once disconnected, and never in x402 mode', async () => {
+    fake();
+    const { cloud } = fakeCloud();
+    const connection = new RoomConnection();
+    await connection.connect({ room: 'demo', cloud, ttl: '2h' });
+    await connection.disconnect();
+    const x402 = new RoomConnection();
+    await x402.connect({ room: 'demo', token: 'x402-token', wsUrl: 'wss://x402.example' });
+    cleanups.push(() => x402.disconnect());
+    await vi.advanceTimersByTimeAsync(24 * 60 * minute);
+    expect(cloud.extendToken).not.toHaveBeenCalled();
+  });
+
+  it('reaches the agent as an error event', async () => {
+    fake();
+    const { cloud } = fakeCloud();
+    (cloud.extendToken as any).mockRejectedValue(cloudError(409, 'session_not_extendable'));
+    const agent = new VoiceAgent({ stt: new MockSTT(), tts: new MockTTS(), llm: new MockLLM(), instructions: 'test' });
+    const errors: Error[] = [];
+    agent.on('error', (e) => errors.push(e));
+    await agent.start({ room: 'demo', cloud, ttl: '2h' });
+    cleanups.push(() => agent.stop());
+    await vi.advanceTimersByTimeAsync(111 * minute);
+    expect(errors.map((e) => e.message)).toEqual(['session_not_extendable']);
+  });
+});
+
+describe('speech reconnects in cloud mode open a new session', () => {
+  it('STT: a lost connection opens a new session in the current language', async () => {
+    const server = await speechServer((ws, message) => {
+      if (message.type === 'config' && message.session_key) ws.send(JSON.stringify({ type: 'ready', client_id: 'c', language: 'en' }));
+    });
+    const { cloud, calls } = fakeCloud(server.url);
+    const stt = new DtelecomSTT({ cloud, language: 'en' });
+    stt.setWebRTCSessionId('webrtc-1');
+    const stream = stt.createStream();
+    cleanups.push(() => stream.close());
+    await vi.waitFor(() => expect(server.connections[0]?.[0]?.session_key).toBe('stt-key-1'));
+    stream.setLanguage!('ru');
+
+    server.drop();
+    await vi.waitFor(() => expect(server.connections[1]?.[0]?.session_key).toBe('stt-key-2'), { timeout: 3000 });
+    expect(server.connections[1][0].language).toBe('ru');
+    expect(calls.filter(([name]) => name === 'stt.createSession').map(([, o]) => o.language)).toEqual(['en', 'ru']);
+  });
+
+  it('TTS: the next text after a lost connection opens a new session', async () => {
+    const server = await speechServer((ws, message) => {
+      if (message.text) {
+        ws.send(JSON.stringify({ type: 'generating', text: message.text }));
+        ws.send(Buffer.from([1, 0]));
+        ws.send(JSON.stringify({ type: 'done' }));
+      }
+    });
+    const { cloud, calls } = fakeCloud(server.url);
+    const tts = new DtelecomTTS({ cloud, voices: { en: { voice: 'af_heart', langCode: 'a' } } });
+    cleanups.push(() => tts.close());
+    const collect = async (text: string) => { const out: Buffer[] = []; for await (const c of tts.synthesize(text)) out.push(c); return out; };
+
+    await collect('Hello');
+    expect(server.connections[0][0].session_key).toBe('tts-key-1');
+    server.drop();
+    await vi.waitFor(() => expect((tts as any).ws).toBeNull());
+    await collect('Again');
+    expect(server.connections[1][0].session_key).toBe('tts-key-2');
+    expect(calls.filter(([name]) => name === 'tts.createSession')).toHaveLength(2);
+  });
+
+  it('uses the cloud stream_url when given, and builds it otherwise', async () => {
+    const { cloud } = fakeCloud('https://speech.example');
+    (cloud.stt.createSession as any).mockResolvedValueOnce({
+      sessionId: 's', token: 'k', serverUrl: 'https://speech.example', streamUrl: 'wss://stream.example/v1/stream',
+      expiresAt: new Date(Date.now() + 600_000),
+    });
+    const given = new CloudSpeechSession({ kind: 'stt', cloud, onExtended: () => {}, onError: () => {} });
+    await given.open();
+    given.close();
+    expect(given.streamUrl).toBe('wss://stream.example/v1/stream');
+    const built = new CloudSpeechSession({ kind: 'stt', cloud, onExtended: () => {}, onError: () => {} });
+    await built.open();
+    built.close();
+    expect(built.streamUrl).toBe('wss://speech.example/v1/stream');
   });
 });

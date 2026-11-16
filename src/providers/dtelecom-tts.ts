@@ -19,11 +19,15 @@
  * client. With `cloud`, the first connection opens a TTS session linked to the agent's WebRTC
  * session; characters are reserved before each text is sent, and the session is extended with
  * {"type":"extend","session_key":"..."} on the open socket.
+ *
+ * A session key serves one connection. After a disconnect, cloud mode opens a new session on the
+ * next text; x402 mode asks `getSessionKey` for a new key, or fails the next text without it.
  */
 
 import WebSocket from 'ws';
 import type { CloudClient } from '@dtelecom/server-sdk-js';
 import { CloudSpeechSession, type CloudTTSSessionOptions } from './cloud-speech-session';
+import { toStreamUrl, type SessionKeyRefresh } from './stream-url';
 import { parseLangSegments } from './deepgram-tts';
 import type { TTSPlugin } from '../core/types';
 import { createLogger } from '../utils/logger';
@@ -45,6 +49,11 @@ export interface DtelecomTTSOptions {
   serverUrl?: string;
   /** JWT session key from x402 gateway */
   sessionKey?: string;
+  /**
+   * x402 mode: returns a new session key for a reconnect (a key serves one connection). Without
+   * it, a text after a lost connection fails.
+   */
+  getSessionKey?: () => Promise<SessionKeyRefresh>;
   /** Voice config per language: { en: { voice: "af_heart", langCode: "a" }, es: { voice: "ef_dora", langCode: "e" } } */
   voices: Record<string, VoiceConfig>;
   /** Default language code (default: "en") */
@@ -74,6 +83,10 @@ export class DtelecomTTS implements TTSPlugin {
   private cloudSession: CloudSpeechSession | null = null;
   private cloudReady: Promise<void> | null = null;
   private webrtcSessionId: string | undefined;
+  private readonly getSessionKey: (() => Promise<SessionKeyRefresh>) | undefined;
+  /** x402 mode: the current key has opened a connection, so a reconnect needs a new one. */
+  private keyUsed = false;
+  private keyRefresh: Promise<void> | null = null;
   private readonly voices: Record<string, VoiceConfig>;
   private readonly defaultLang: string;
   private readonly speed: number;
@@ -109,6 +122,7 @@ export class DtelecomTTS implements TTSPlugin {
     this.sessionKey = options.sessionKey ?? '';
     this.cloud = options.cloud;
     this.cloudOptions = options.cloudSession;
+    this.getSessionKey = options.getSessionKey;
     this.voices = { ...options.voices };
     this.defaultLang = options.defaultLanguage ?? Object.keys(this.voices)[0];
     this.speed = options.speed ?? 1.0;
@@ -364,7 +378,7 @@ export class DtelecomTTS implements TTSPlugin {
     }
   }
 
-  /** Cloud mode: opens the TTS session once; reconnects keep using its current key. */
+  /** Cloud mode: opens a TTS session; a lost connection drops it, so the next one opens anew. */
   private ensureCloudSession(): Promise<void> {
     if (!this.cloud) return Promise.resolve();
     if (!this.cloudReady) {
@@ -385,7 +399,7 @@ export class DtelecomTTS implements TTSPlugin {
       });
       this.cloudReady = session.open(this.webrtcSessionId).then(() => {
         this.cloudSession = session;
-        this.serverUrl = session.serverUrl;
+        this.serverUrl = session.streamUrl;
         this.sessionKey = session.token;
       }, (err) => {
         this.cloudReady = null;
@@ -393,6 +407,33 @@ export class DtelecomTTS implements TTSPlugin {
       });
     }
     return this.cloudReady;
+  }
+
+  /** Cloud mode: a session key serves one connection, so a lost connection ends its session. */
+  private dropCloudSession(): void {
+    if (!this.cloudSession) return;
+    this.cloudSession.close();
+    this.cloudSession = null;
+    this.cloudReady = null;
+  }
+
+  /** x402 mode: a new key for the next connection, from getSessionKey. */
+  private refreshSessionKey(): Promise<void> {
+    if (!this.getSessionKey) {
+      return Promise.reject(new Error(
+        'dTelecom TTS connection lost: a session key serves one connection; pass getSessionKey to reconnect',
+      ));
+    }
+    if (!this.keyRefresh) {
+      this.keyRefresh = this.getSessionKey().then(({ sessionKey, serverUrl }) => {
+        this.sessionKey = sessionKey;
+        if (serverUrl) this.serverUrl = serverUrl;
+        this.keyUsed = false;
+      }).finally(() => {
+        this.keyRefresh = null;
+      });
+    }
+    return this.keyRefresh;
   }
 
   /** Ensure a WebSocket connection exists and is open. */
@@ -403,14 +444,22 @@ export class DtelecomTTS implements TTSPlugin {
     if (this.cloud && !this.cloudSession) {
       return this.ensureCloudSession().then(() => this.ensureConnection());
     }
+    if (!this.cloud && this.keyUsed) {
+      return this.refreshSessionKey().then(() => this.ensureConnection());
+    }
 
     // Deduplicate concurrent connection attempts
     if (this.connectPromise) return this.connectPromise;
 
     this.connectPromise = new Promise<void>((resolve, reject) => {
-      // Use /v1/stream auth path, convert https:// to wss://
-      const url = this.serverUrl.replace(/\/$/, '') + '/v1/stream';
-      const wsUrl = url.replace('https://', 'wss://').replace('http://', 'ws://');
+      let wsUrl: string;
+      try {
+        wsUrl = toStreamUrl(this.serverUrl);
+      } catch (err) {
+        this.connectPromise = null;
+        reject(err);
+        return;
+      }
 
       log.debug(`Connecting to dTelecom TTS: ${wsUrl}`);
 
@@ -419,6 +468,7 @@ export class DtelecomTTS implements TTSPlugin {
 
       ws.on('open', () => {
         this.connectPromise = null;
+        this.keyUsed = true;
 
         // Send initial config with session_key and default voice
         const defaultVoice = this.voices[this.defaultLang];
@@ -501,6 +551,7 @@ export class DtelecomTTS implements TTSPlugin {
           }
           this.ws = null;
           this.connectPromise = null;
+          this.dropCloudSession();
         }
         reject(error);
       });
@@ -510,6 +561,7 @@ export class DtelecomTTS implements TTSPlugin {
         if (this.ws === ws) {
           this.ws = null;
           this.connectPromise = null;
+          this.dropCloudSession();
           const state = this.flushState;
           if (state) {
             state.done = true;

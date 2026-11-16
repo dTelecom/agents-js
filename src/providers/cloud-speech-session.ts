@@ -4,11 +4,13 @@
  * Holds are small and grow on demand: STT is prepaid in time chunks and extended before it runs
  * out; TTS in character chunks, extended before a text would pass the limit and before its
  * 30-minute window closes. Every extension yields a new session key, which the owner sends to the
- * open socket as {"type":"extend","session_key":...}.
+ * open socket as {"type":"extend","session_key":...}. A session key serves one connection: after a
+ * disconnect, the owner closes this session and opens a new one.
  */
 
 import type { CloudClient } from '@dtelecom/server-sdk-js';
 import { createLogger } from '../utils/logger';
+import { toStreamUrl } from './stream-url';
 
 const log = createLogger('CloudSpeechSession');
 
@@ -47,6 +49,8 @@ export class CloudSpeechSession {
   sessionId = '';
   token = '';
   serverUrl = '';
+  /** WebSocket address of the session's stream. */
+  streamUrl = '';
   private expiresAt = 0;
   private maxCharacters = 0;
   private usedCharacters = 0;
@@ -78,6 +82,8 @@ export class CloudSpeechSession {
     this.sessionId = session.sessionId;
     this.token = session.token;
     this.serverUrl = session.serverUrl;
+    // server-sdk-js before 4.2 has no streamUrl.
+    this.streamUrl = (session as { streamUrl?: string }).streamUrl ?? toStreamUrl(session.serverUrl);
     this.expiresAt = session.expiresAt.getTime();
     this.maxCharacters = kind === 'tts' ? this.characters : 0;
     log.info(`Cloud ${kind.toUpperCase()} session ${this.sessionId} on ${this.serverUrl}`);

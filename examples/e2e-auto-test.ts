@@ -217,8 +217,8 @@ async function main(): Promise<void> {
     log('RESPONSE', text);
   });
 
-  agent.on('speaking', (s) => {
-    log('SPEAKING', s ? 'started' : 'stopped');
+  agent.on('agentState', (state) => {
+    log('STATE', state);
   });
 
   agent.on('error', (err) => {

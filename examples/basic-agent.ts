@@ -7,8 +7,8 @@
  *   npx tsx examples/basic-agent.ts
  */
 
-import { VoiceAgent, setLogLevel } from '@dtelecom/agents';
-import { DeepgramSTT, OpenRouterLLM, CartesiaTTS } from '@dtelecom/agents/providers';
+import { VoiceAgent, setLogLevel } from '@dtelecom/agents-js';
+import { DeepgramSTT, OpenRouterLLM, CartesiaTTS } from '@dtelecom/agents-js/providers';
 
 setLogLevel('info');
 

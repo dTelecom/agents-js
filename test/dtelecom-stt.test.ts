@@ -108,7 +108,8 @@ it('keeps the default config and final transcript shape, ignores unsolicited par
 });
 
 it.each([true, false])('passes explicit feature flags (%s), preserving them across language changes and reconnects', async enabled => {
-  const f = await fixture({ partials: enabled, smartTurn: enabled });
+  // A key serves one connection: the reconnect asks for a new one.
+  const f = await fixture({ partials: enabled, smartTurn: enabled, getSessionKey: async () => ({ sessionKey: 'test-only-2' }) });
   const stream = f.stream();
   await vi.waitFor(() => expect(f.messages).toHaveLength(1));
   expect(f.messages[0]).toMatchObject({ partials: enabled, smart_turn: enabled });
@@ -117,7 +118,7 @@ it.each([true, false])('passes explicit feature flags (%s), preserving them acro
   expect(f.messages[1]).toEqual({ type: 'config', language: 'ru', partials: enabled, smart_turn: enabled });
   f.sockets[0].close();
   await vi.waitFor(() => expect(f.messages).toHaveLength(3), { timeout: 2000 });
-  expect(f.messages[2]).toMatchObject({ language: 'ru', partials: enabled, smart_turn: enabled, session_key: 'test-only' });
+  expect(f.messages[2]).toMatchObject({ language: 'ru', partials: enabled, smart_turn: enabled, session_key: 'test-only-2' });
 });
 
 it.each(['active', 'acoustic_fallback', undefined])('reports Smart Turn readiness honestly: %s', async mode => {
@@ -184,4 +185,26 @@ it.each(['discarded', 'replaced', 'reconfigured'])('forwards partial_end reason 
   await vi.waitFor(() => expect(f.messages).toHaveLength(1));
   f.send({ type: 'partial_end', utterance_id: 'u1', reason });
   await vi.waitFor(() => expect(ended).toHaveBeenCalledWith({ utteranceId: 'u1', reason }));
+});
+
+it('x402 without getSessionKey: a lost connection is reported, not retried with the used key', async () => {
+  const f = await fixture();
+  const stream = f.stream();
+  const errors: Error[] = [];
+  stream.on('error', error => errors.push(error));
+  await vi.waitFor(() => expect(f.messages).toHaveLength(1));
+  f.sockets[0].close();
+  await vi.waitFor(() => expect(errors.map(e => e.message).join()).toContain('getSessionKey'), { timeout: 2000 });
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  expect(f.sockets).toHaveLength(1);
+});
+
+it('keeps at most 5 s of audio while connecting, dropping the oldest', async () => {
+  const f = await fixture();
+  const stream = f.stream();
+  for (let i = 0; i < 10; i++) stream.sendAudio(Buffer.alloc(32_000, i)); // 10 x 1 s
+  await vi.waitFor(() => expect(f.messages).toHaveLength(1));
+  f.send({ type: 'ready', language: 'en', client_id: 'test' });
+  await vi.waitFor(() => expect(f.messages.filter(Buffer.isBuffer)).toHaveLength(5));
+  expect(f.messages.filter(Buffer.isBuffer).map((b: Buffer) => b[0])).toEqual([5, 6, 7, 8, 9]);
 });
