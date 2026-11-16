@@ -6,6 +6,7 @@
 - A speech session key serves one connection. After a disconnect, `DtelecomSTT` and `DtelecomTTS` in cloud mode open a new session (STT in its current language, with backoff from 1 s to 30 s) instead of reusing the key. In x402 mode pass `getSessionKey` to supply a new key; without it a lost connection is reported as an `error` instead of reconnecting with the used key.
 - Speech streams connect to the cloud's `stream_url` when it is given (`@dtelecom/server-sdk-js` 4.2), else to `serverUrl` + `/v1/stream`. TTS now accepts a server URL that already ends in `/v1/stream`.
 - STT keeps at most 5 s of audio while it connects; the oldest is dropped first.
+- Requires Node.js 22 or later, as `@dtelecom/server-sdk-node` 0.3 does (werift 0.27). Peer dependency `@dtelecom/server-sdk-node` is now `>=0.3.0`: 0.2.x runs a postinstall that fails in a fresh project.
 - README: the events table lists `agentState`, `sentence` and `toolCall`; `speaking` was never emitted. Examples import `@dtelecom/agents-js`.
 
 ## 0.7.0 — 2026-11-10

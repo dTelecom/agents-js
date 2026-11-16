@@ -28,6 +28,8 @@ For dTelecom TTS, cancellation sends `clear` and waits for `cleared` before reus
 npm install @dtelecom/agents-js @dtelecom/server-sdk-js @dtelecom/server-sdk-node
 ```
 
+Requires Node.js 22 or later.
+
 ## Quick Start (other providers)
 
 ```ts

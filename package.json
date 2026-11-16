@@ -38,7 +38,7 @@
   },
   "peerDependencies": {
     "@dtelecom/server-sdk-js": ">=4.1.0",
-    "@dtelecom/server-sdk-node": ">=0.2.5",
+    "@dtelecom/server-sdk-node": ">=0.3.0",
     "@huggingface/transformers": ">=3.0.0",
     "better-sqlite3": ">=11.0.0",
     "sqlite-vec": ">=0.1.0"
@@ -64,8 +64,8 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@dtelecom/server-sdk-js": "^4.1.0",
-    "@dtelecom/server-sdk-node": "^0.2.5",
+    "@dtelecom/server-sdk-js": "^4.2.0",
+    "@dtelecom/server-sdk-node": "^0.3.0",
     "@huggingface/transformers": "^3.8.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/ws": "^8.5.13",
@@ -77,7 +77,7 @@
     "vitest": "^2.1.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "license": "Apache-2.0",
   "repository": {
