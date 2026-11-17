@@ -56,7 +56,7 @@ export interface DtelecomTTSOptions {
   getSessionKey?: () => Promise<SessionKeyRefresh>;
   /** Voice config per language: { en: { voice: "af_heart", langCode: "a" }, es: { voice: "ef_dora", langCode: "e" } } */
   voices: Record<string, VoiceConfig>;
-  /** Default language code (default: "en") */
+  /** Default language code; the first language in `voices` when omitted */
   defaultLanguage?: string;
   /** Speech speed multiplier (default: 1.0) */
   speed?: number;

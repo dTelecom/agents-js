@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1 — 2026-11-17
+
+- Docs only: `DtelecomTTSOptions.defaultLanguage` defaults to the first language in `voices`; its comment said `"en"`.
+
 ## 0.8.0 — 2026-11-16
 
 - The agent keeps its room: in cloud mode it extends its own WebRTC token by `ttl` before the token expires (10 minutes before, or at half its life for short tokens), since dTelecom Cloud now removes a participant a minute after an unextended token expires. A failed extension surfaces as an `error` event; a refused payment is retried every 15 s until the token's grace ends; `session_not_extendable` is reported once.
