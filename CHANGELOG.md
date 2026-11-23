@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2 — 2026-11-23
+
+- Docs only: the README links [docs.dtelecom.org](https://docs.dtelecom.org) and starts with the dTelecom Cloud quick start. Code is the same as 0.8.1.
+
 ## 0.8.1 — 2026-11-17
 
 - Docs only: `DtelecomTTSOptions.defaultLanguage` defaults to the first language in `voices`; its comment said `"en"`.
