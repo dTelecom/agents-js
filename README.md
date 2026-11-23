@@ -2,6 +2,8 @@
 
 AI voice agent framework for [dTelecom](https://dtelecom.org) rooms. Build real-time voice agents that join WebRTC rooms and interact with participants using speech-to-text, LLMs, and text-to-speech.
 
+**Documentation:** [docs.dtelecom.org](https://docs.dtelecom.org), see the [agents SDK reference](https://docs.dtelecom.org/reference/agents-sdk/) and the [voice agent guide](https://docs.dtelecom.org/guides/voice-agent/).
+
 ## Architecture
 
 ```
@@ -30,35 +32,7 @@ npm install @dtelecom/agents-js @dtelecom/server-sdk-js @dtelecom/server-sdk-nod
 
 Requires Node.js 22 or later.
 
-## Quick Start (other providers)
-
-```ts
-import { VoiceAgent, setLogLevel } from '@dtelecom/agents-js';
-import { DeepgramSTT, OpenRouterLLM, CartesiaTTS } from '@dtelecom/agents-js/providers';
-
-const agent = new VoiceAgent({
-  stt: new DeepgramSTT({ apiKey: process.env.DEEPGRAM_API_KEY! }),
-  llm: new OpenRouterLLM({
-    apiKey: process.env.OPENROUTER_API_KEY!,
-    model: 'openai/gpt-4o',
-  }),
-  tts: new CartesiaTTS({
-    apiKey: process.env.CARTESIA_API_KEY!,
-    voiceId: 'your-voice-id',
-  }),
-  instructions: 'You are a helpful voice assistant.',
-});
-
-await agent.start({
-  room: 'my-room',
-  apiKey: process.env.DTELECOM_API_KEY!,
-  apiSecret: process.env.DTELECOM_API_SECRET!,
-});
-```
-
-`apiKey` and `apiSecret` are a dTelecom Cloud project's API key; the agent's token comes from the cloud at `DTELECOM_CLOUD_URL`. Pass `cloud` instead to reuse a client (see below).
-
-## dTelecom Cloud speech (0.7.0+)
+## Quick Start: dTelecom Cloud (0.7.0+)
 
 With a dTelecom Cloud project, give the agent and the dTelecom providers one `CloudClient` from `@dtelecom/server-sdk-js` 4.1 or newer. The agent mints its own WebRTC token; the providers open their speech sessions, link them to the agent's room session, and extend them before they run out.
 
@@ -86,6 +60,34 @@ Your backend gives each human participant a token with `cloud.createToken`. How 
 - `ttl` sets how long the agent's room token holds (default 6 hours, at most 24). The agent extends it by the same amount before it expires, so it stays until `stop()`; the cloud removes a participant a minute after an unextended token expires. A failed extension surfaces as an `error` event.
 
 Rates are in the dashboard's billing catalog: STT $0.004 per connected minute, TTS $0.006 per 1,000 characters, WebRTC audio $0.0001 per participant minute. File transcription, WAV synthesis, translation, vision and moderation are on `CloudClient` itself; VoiceAgent does not call them.
+
+## Other STT and TTS providers
+
+```ts
+import { VoiceAgent, setLogLevel } from '@dtelecom/agents-js';
+import { DeepgramSTT, OpenRouterLLM, CartesiaTTS } from '@dtelecom/agents-js/providers';
+
+const agent = new VoiceAgent({
+  stt: new DeepgramSTT({ apiKey: process.env.DEEPGRAM_API_KEY! }),
+  llm: new OpenRouterLLM({
+    apiKey: process.env.OPENROUTER_API_KEY!,
+    model: 'openai/gpt-4o',
+  }),
+  tts: new CartesiaTTS({
+    apiKey: process.env.CARTESIA_API_KEY!,
+    voiceId: 'your-voice-id',
+  }),
+  instructions: 'You are a helpful voice assistant.',
+});
+
+await agent.start({
+  room: 'my-room',
+  apiKey: process.env.DTELECOM_API_KEY!,
+  apiSecret: process.env.DTELECOM_API_SECRET!,
+});
+```
+
+`apiKey` and `apiSecret` are a dTelecom Cloud project's API key; the agent's token comes from the cloud at `DTELECOM_CLOUD_URL`. Pass `cloud` instead to reuse a client (see above).
 
 ## dTelecom gateway speech (x402)
 
