@@ -3,13 +3,35 @@
  * for TTS synthesis.
  *
  * Split strategy:
- * 1. Sentence boundary (.!?) — always split
- * 2. Clause boundary (,;:—) — split if buffer >= MIN_CHUNK chars
+ * 1. Sentence end — split at the first one that completes a chunk of at least MIN_CHUNK chars.
+ *    A sentence ends at `.`, `!`, `?` or `؟` (plus closing quotes or brackets) followed by whitespace,
+ *    so decimals, versions and domains ($0.004, 4.2.1, docs.example.com) stay whole, or at a
+ *    CJK or Devanagari full stop (。！？।), which needs no space. A `.` after a common abbreviation (e.g., Dr.)
+ *    is not an end. A `.` at the very end of the buffer waits for the next token.
+ * 2. Clause boundary (,;:—) — split if buffer >= MAX_CHUNK chars
  * 3. Word boundary — forced split if buffer >= MAX_CHUNK chars
  */
 
 const MIN_CHUNK = 20;
 const MAX_CHUNK = 250;
+
+const SENTENCE_END = /[.!?\u061f]+["'\u201d\u2019\u00bb)\]]*\s+|[\u3002\uff01\uff1f\u0964]+["'\u201d\u2019\u300d\u300f)\uff09]*\s*/g;
+/** Words whose trailing `.` does not end a sentence (compared in lower case, without the dot). */
+const ABBREVIATIONS = new Set(['e.g', 'i.e', 'etc', 'vs', 'mr', 'mrs', 'ms', 'dr', 'prof', 'st', 'approx', 'inc', 'ltd', 'u.s']);
+
+/** End of the first sentence that makes a chunk of at least MIN_CHUNK chars, or -1. */
+function sentenceEnd(buffer: string): number {
+  SENTENCE_END.lastIndex = 0;
+  for (let match = SENTENCE_END.exec(buffer); match; match = SENTENCE_END.exec(buffer)) {
+    const end = match.index + match[0].length;
+    if (match[0].startsWith('.')) {
+      const word = buffer.slice(0, match.index).match(/([\p{L}.]+)$/u)?.[1]?.toLowerCase();
+      if (word && ABBREVIATIONS.has(word)) continue;
+    }
+    if (buffer.slice(0, end).trim().length >= MIN_CHUNK) return end;
+  }
+  return -1;
+}
 
 export class SentenceSplitter {
   private buffer = '';
@@ -36,16 +58,12 @@ export class SentenceSplitter {
     const chunks: string[] = [];
 
     while (true) {
-      // 1. Sentence boundary (.!?) — split on complete sentences
-      const sentenceMatch = this.buffer.match(/[^.!?]*[.!?]\s*/);
-      if (sentenceMatch && sentenceMatch.index !== undefined) {
-        const end = sentenceMatch.index + sentenceMatch[0].length;
-        const chunk = this.buffer.slice(0, end).trim();
-        if (chunk.length >= MIN_CHUNK) {
-          chunks.push(chunk);
-          this.buffer = this.buffer.slice(end);
-          continue;
-        }
+      // 1. Sentence end — split on complete sentences
+      const end = sentenceEnd(this.buffer);
+      if (end > 0) {
+        chunks.push(this.buffer.slice(0, end).trim());
+        this.buffer = this.buffer.slice(end);
+        continue;
       }
 
       // 2. Clause boundary (,;:—) if buffer is getting long

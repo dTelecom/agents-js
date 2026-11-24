@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.1 — 2026-11-24
+
+- Speech no longer breaks numbers apart. A sentence now ends at `.`, `!`, `?` or `؟` followed by a space (or at 。！？।, which need none), so decimals, versions and domains such as `$0.004`, `4.2.1` and `docs.dtelecom.org` reach TTS whole, whatever the token boundaries. Before, a reply streamed as "costs $0." + "004 per minute" was spoken as two sentences. A period after common abbreviations (e.g., i.e., Dr.) does not end a sentence.
+- A short first sentence such as "Hi!" no longer holds back the rest of the reply: it joins the next sentence and is spoken as soon as that one is complete, instead of waiting for 250 characters or the end of the reply.
+
 ## 0.9.0 — 2026-11-24
 
 - Tool results: a tool with a `handler` (`{ definition, handler, timeoutMs? }`) is run by the agent; its result goes back to the model as a `tool` message and the agent speaks the answer. Errors, invalid arguments and timeouts (default 30 s) go back as `{"error": ...}`; barge-in aborts the handler. At most three tool rounds per turn, then the model is asked to answer with `tool_choice: "none"`. The call and its result are kept together in the context. A bare `ToolDefinition` behaves as before (emit `toolCall`, end the turn).

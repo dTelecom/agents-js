@@ -17,16 +17,11 @@ describe('SentenceSplitter', () => {
     expect(chunks).toEqual([]);
   });
 
-  it('short sentence stays buffered until combined chunk is large enough', () => {
+  it('a short first sentence joins the next one instead of holding the answer back', () => {
     const s = new SentenceSplitter();
-    let chunks = s.push('Hi. ');
-    expect(chunks).toEqual([]);
-    // Adding more text — the regex still matches "Hi. " first (< MIN_CHUNK),
-    // and total buffer < MAX_CHUNK, so nothing splits yet
-    chunks = s.push('This is more text that goes on. ');
-    expect(chunks).toEqual([]);
-    // But flush returns the accumulated buffer
-    expect(s.flush()).toBe('Hi. This is more text that goes on.');
+    expect(s.push('Hi. ')).toEqual([]);
+    expect(s.push('This is more text that goes on. ')).toEqual(['Hi. This is more text that goes on.']);
+    expect(s.flush()).toBeNull();
   });
 
   it('splits at clause boundary when buffer exceeds MAX_CHUNK', () => {
@@ -108,5 +103,56 @@ describe('SentenceSplitter', () => {
     expect(s.push('a test ')).toEqual([]);
     const chunks = s.push('sentence. ');
     expect(chunks).toEqual(['This is a test sentence.']);
+  });
+
+  it('keeps decimals, versions and domains whole, whatever the token boundaries', () => {
+    const text = 'Streaming speech-to-text costs $0.004 per minute. Install version 4.2.1 from docs.dtelecom.org today. ';
+    for (const size of [1, 2, 3, 5, 7, 11]) {
+      const s = new SentenceSplitter();
+      const chunks: string[] = [];
+      for (let i = 0; i < text.length; i += size) chunks.push(...s.push(text.slice(i, i + size)));
+      const rest = s.flush();
+      if (rest) chunks.push(rest);
+      expect(chunks).toEqual(['Streaming speech-to-text costs $0.004 per minute.', 'Install version 4.2.1 from docs.dtelecom.org today.']);
+    }
+  });
+
+  it('waits for the next token when a period ends the buffer', () => {
+    const s = new SentenceSplitter();
+    expect(s.push('File transcription costs $0.')).toEqual([]);
+    expect(s.push('002 per minute. ')).toEqual(['File transcription costs $0.002 per minute.']);
+  });
+
+  it('does not end a sentence after common abbreviations', () => {
+    const s = new SentenceSplitter();
+    expect(s.push('Many languages are supported, e.g. English and Russian. Dr. Smith agrees with this. ')).toEqual([
+      'Many languages are supported, e.g. English and Russian.',
+      'Dr. Smith agrees with this.',
+    ]);
+    expect(new SentenceSplitter().push('The short answer is no. It needs a paid plan to work. ')).toEqual([
+      'The short answer is no.',
+      'It needs a paid plan to work.',
+    ]);
+  });
+
+  it('splits at closing quotes and at CJK, Devanagari and Arabic sentence ends', () => {
+    expect(new SentenceSplitter().push('He said "this is the end." And then he left the room. ')).toEqual([
+      'He said "this is the end."',
+      'And then he left the room.',
+    ]);
+    const zh = new SentenceSplitter();
+    expect(zh.push('这是一个很长的句子，用来测试中文的分句是否正常工作。第二句话较短。')).toEqual([
+      '这是一个很长的句子，用来测试中文的分句是否正常工作。',
+    ]);
+    // A short last sentence waits for the end of the answer, as in every language.
+    expect(zh.flush()).toBe('第二句话较短。');
+    expect(new SentenceSplitter().push('यह एक लंबा वाक्य है जो परीक्षण के लिए है। दूसरा वाक्य भी काफी लंबा है।')).toEqual([
+      'यह एक लंबा वाक्य है जो परीक्षण के लिए है।',
+      'दूसरा वाक्य भी काफी लंबा है।',
+    ]);
+    expect(new SentenceSplitter().push('هل تريد أن تعرف المزيد عن الخدمة؟ يمكنك زيارة الموقع الآن. ')).toEqual([
+      'هل تريد أن تعرف المزيد عن الخدمة؟',
+      'يمكنك زيارة الموقع الآن.',
+    ]);
   });
 });
