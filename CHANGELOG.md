@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased (0.9.0)
+
+- Tool results: a tool with a `handler` (`{ definition, handler, timeoutMs? }`) is run by the agent; its result goes back to the model as a `tool` message and the agent speaks the answer. Errors, invalid arguments and timeouts (default 30 s) go back as `{"error": ...}`; barge-in aborts the handler. At most three tool rounds per turn, then the model is asked to answer with `tool_choice: "none"`. The call and its result are kept together in the context. A bare `ToolDefinition` behaves as before (emit `toolCall`, end the turn).
+- `Message` is now the OpenAI chat union: assistant messages can carry `tool_calls` (with `content: null`), and `role: 'tool'` messages carry `tool_call_id`. `LLMChatOptions.toolChoice` is sent as `tool_choice` by both LLM providers when tools are passed.
+- New `metrics` event per completed turn (`TurnMetrics`): the latency already logged as `LATENCY`, in milliseconds, plus `toolMs` and `toolCalls`.
+
 ## 0.8.2 — 2026-11-23
 
 - Docs only: the README links [docs.dtelecom.org](https://docs.dtelecom.org) and starts with the dTelecom Cloud quick start. Code is the same as 0.8.1.

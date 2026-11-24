@@ -51,10 +51,23 @@ export interface STTPlugin {
 
 // ─── LLM Plugin ──────────────────────────────────────────────────────────────
 
-export interface Message {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+/** A tool call as it appears on an assistant message (OpenAI chat format). */
+export interface ToolCallPart {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
 }
+
+/**
+ * A chat message (OpenAI chat format). An assistant message that calls tools carries
+ * `tool_calls`, with `content: null` when it says nothing; each result follows as a `tool`
+ * message with the call's id.
+ */
+export type Message =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string; tool_calls?: undefined }
+  | { role: 'assistant'; content: string | null; tool_calls: ToolCallPart[] }
+  | { role: 'tool'; tool_call_id: string; content: string };
 
 export interface ToolDefinition {
   type: 'function';
@@ -68,8 +81,37 @@ export interface ToolDefinition {
 export interface ToolCallResult {
   id: string;
   name: string;
+  /** Raw JSON text of the arguments, as the model produced it. */
   arguments: string;
 }
+
+/** What a tool handler receives besides its arguments. */
+export interface ToolContext {
+  /** Aborted on barge-in, when the agent stops, or after the tool's timeout. */
+  signal: AbortSignal;
+  /** The call as the model made it. */
+  call: ToolCallResult;
+}
+
+/**
+ * Runs a tool. The return value goes back to the model: a string as is, anything else as JSON.
+ * A thrown error goes back as `{"error": message}`, so the model can explain or retry.
+ */
+export type ToolHandler = (args: any, context: ToolContext) => unknown | Promise<unknown>;
+
+/** A tool the agent runs itself: the model gets its result and answers with it. */
+export interface AgentTool {
+  definition: ToolDefinition;
+  handler: ToolHandler;
+  /** Abort the handler after this long (default: 30000 ms); the model gets a timeout error. */
+  timeoutMs?: number;
+}
+
+/**
+ * A tool for the agent. With a handler (`AgentTool`) the agent runs it and speaks the model's
+ * answer. A bare `ToolDefinition` only emits `toolCall` and ends the turn; the app answers with `say()`.
+ */
+export type Tool = ToolDefinition | AgentTool;
 
 export interface LLMChunk {
   type: 'token' | 'segment' | 'tool_call' | 'done';
@@ -84,6 +126,8 @@ export interface LLMChatOptions {
   plainText?: boolean;
   /** Tool definitions to pass to the LLM for function calling. */
   tools?: ToolDefinition[];
+  /** 'none' asks the model to answer in text without calling a tool (sent as `tool_choice`). */
+  toolChoice?: 'auto' | 'none';
 }
 
 export interface LLMPlugin {
@@ -144,8 +188,8 @@ export interface AgentConfig {
   memory?: MemoryConfig;
   /** Max context tokens before triggering summarization (default: 5000) */
   maxContextTokens?: number;
-  /** Tool definitions for LLM function calling. */
-  tools?: ToolDefinition[];
+  /** Tools for LLM function calling: with a handler the agent runs them, see `Tool`. */
+  tools?: Tool[];
 }
 
 export interface AgentStartOptions {
@@ -203,13 +247,39 @@ export interface PipelineOptions {
   memory?: import('../memory/room-memory').RoomMemory;
   /** Max context tokens before triggering summarization (default: 5000) */
   maxContextTokens?: number;
-  /** Tool definitions for LLM function calling. */
-  tools?: ToolDefinition[];
+  /** Tools for LLM function calling: with a handler the agent runs them, see `Tool`. */
+  tools?: Tool[];
 }
 
 // ─── Events ──────────────────────────────────────────────────────────────────
 
 export type AgentState = 'idle' | 'listening' | 'thinking' | 'speaking';
+
+/**
+ * Latency of one completed turn, in milliseconds; null when that stage did not happen.
+ * Emitted as `metrics` after the turn's reply, not for aborted turns or `say()`.
+ */
+export interface TurnMetrics {
+  speaker: string;
+  /** STT processing time reported by the server (from the last interim to the final). */
+  sttMs: number;
+  /** Final transcript received → turn started (waiting for a previous turn). */
+  queueMs: number;
+  /** Turn started → LLM request (warmup, summary, memory search). */
+  prepareMs: number;
+  /** LLM request → first token. */
+  ttftMs: number | null;
+  /** LLM request → first complete sentence. Includes tool time when the first sentence follows a tool call. */
+  llmMs: number | null;
+  /** First sentence → first audio sent. */
+  ttsMs: number | null;
+  /** stt + queue + prepare + llm + tts: speech end (excluding end-of-speech detection) to first audio. */
+  overallMs: number | null;
+  /** Total time in tool handlers; 0 without tool calls. */
+  toolMs: number;
+  /** Tool calls made during the turn. */
+  toolCalls: number;
+}
 
 export interface AgentEvents {
   transcription: (result: TranscriptionResult & { speaker: string }) => void;
@@ -222,8 +292,10 @@ export interface AgentEvents {
   response: (text: string) => void;
   /** Agent state: idle → listening (STT active) → thinking (LLM) → speaking (audio) → idle. */
   agentState: (state: AgentState) => void;
-  /** Emitted when the LLM invokes a tool. */
+  /** Emitted when the LLM invokes a tool, before a handler runs. */
   toolCall: (toolCall: ToolCallResult) => void;
+  /** Per-turn latency after each completed reply. */
+  metrics: (metrics: TurnMetrics) => void;
   error: (error: Error) => void;
   connected: () => void;
   disconnected: (reason?: string) => void;
@@ -237,7 +309,8 @@ export interface PipelineEvents {
   sentence: (text: string) => void;
   response: (text: string) => void;
   agentState: (state: AgentState) => void;
-  /** Emitted when the LLM invokes a tool. */
+  /** Emitted when the LLM invokes a tool, before a handler runs. */
   toolCall: (toolCall: ToolCallResult) => void;
+  metrics: (metrics: TurnMetrics) => void;
   error: (error: Error) => void;
 }

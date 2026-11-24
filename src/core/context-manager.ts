@@ -1,4 +1,4 @@
-import type { Message, LLMPlugin } from './types';
+import type { Message, LLMPlugin, ToolCallPart } from './types';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('ContextManager');
@@ -17,11 +17,21 @@ export interface ContextManagerOptions {
   recentTurnsToKeep?: number;
 }
 
+/** One tool round: what the agent said with the calls, the calls and their results. */
+export interface ToolExchange {
+  content: string | null;
+  calls: ToolCallPart[];
+  results: Array<{ id: string; content: string }>;
+}
+
 interface Turn {
   speaker: string;
+  /** Plain text for summaries and size estimates. */
   text: string;
   isAgent: boolean;
   timestamp: number;
+  /** Set on an agent turn that called tools: sent back as an assistant tool call and its results. */
+  tool?: ToolExchange;
 }
 
 export class ContextManager {
@@ -45,6 +55,23 @@ export class ContextManager {
       text,
       isAgent: false,
       timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * Add a tool round. It stays one turn, so the call and its results are kept or summarized
+   * together and the model always sees a result for every call.
+   */
+  addToolExchange(exchange: ToolExchange): void {
+    const calls = exchange.calls
+      .map((call, i) => `${call.function.name}(${call.function.arguments}) → ${exchange.results[i]?.content ?? ''}`)
+      .join('; ');
+    this.turns.push({
+      speaker: 'assistant',
+      text: `${exchange.content ? `${exchange.content} ` : ''}[tool ${calls}]`,
+      isAgent: true,
+      timestamp: Date.now(),
+      tool: exchange,
     });
   }
 
@@ -97,7 +124,9 @@ export class ContextManager {
       : this.turns;
 
     for (const turn of turnsToInclude) {
-      if (turn.isAgent) {
+      if (turn.tool) {
+        messages.push(...toolMessages(turn.tool));
+      } else if (turn.isAgent) {
         messages.push({ role: 'assistant', content: turn.text });
       } else {
         messages.push({
@@ -169,4 +198,12 @@ export class ContextManager {
     this.turns = [];
     this.summary = null;
   }
+}
+
+/** The messages of a tool round: the assistant's calls, then one result per call. */
+export function toolMessages(exchange: ToolExchange): Message[] {
+  return [
+    { role: 'assistant', content: exchange.content, tool_calls: exchange.calls },
+    ...exchange.results.map((r): Message => ({ role: 'tool', tool_call_id: r.id, content: r.content })),
+  ];
 }

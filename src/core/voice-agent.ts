@@ -148,6 +148,7 @@ export class VoiceAgent extends EventEmitter {
     this.pipeline.on('response', (text) => this.emit('response', text));
     this.pipeline.on('agentState', (state) => this.emit('agentState', state));
     this.pipeline.on('toolCall', (tc) => this.emit('toolCall', tc));
+    this.pipeline.on('metrics', (metrics) => this.emit('metrics', metrics));
     this.pipeline.on('error', (error) => this.emit('error', error));
 
     // 5. Subscribe to existing remote participants

@@ -116,6 +116,7 @@ export class OpenRouterLLM implements LLMPlugin {
     }
     if (options?.tools?.length) {
       body.tools = options.tools;
+      if (options.toolChoice) body.tool_choice = options.toolChoice;
     }
 
     log.debug(`LLM request: model=${this.model}, messages=${messages.length}`);

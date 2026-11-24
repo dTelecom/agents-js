@@ -197,6 +197,7 @@ Smart Turn defaults to off. Current server defaults are completion threshold 0.5
 | `agentName` | `string` | `'assistant'` | Name for addressed-mode detection |
 | `nameVariants` | `string[]` | `[]` | Additional names to respond to |
 | `onDataMessage` | `DataMessageHandler` | `undefined` | Callback for data channel messages |
+| `tools` | `Tool[]` | `undefined` | Tools the model can call; see [Tools](#tools) |
 
 ## Events
 
@@ -209,10 +210,49 @@ Smart Turn defaults to off. Current server defaults are completion threshold 0.5
 | `sentence` | `string` | A sentence finished playing |
 | `response` | `string` | Full agent response text |
 | `agentState` | `'idle' \| 'listening' \| 'thinking' \| 'speaking'` | Agent state changed |
-| `toolCall` | `ToolCallResult` | The LLM invoked a tool |
+| `toolCall` | `ToolCallResult` | The LLM invoked a tool (before its handler runs) |
+| `metrics` | `TurnMetrics` | Per-turn latency after a completed reply; see [Latency metrics](#latency-metrics) |
 | `error` | `Error` | Pipeline, speech session or token extension error |
 | `connected` | — | Agent connected to room |
 | `disconnected` | `string?` | Agent disconnected |
+
+## Tools
+
+Give a tool a `handler` and the agent runs it: the model gets the result and the agent speaks its answer. Anything the model says before the call ("Let me check.") is spoken while the tool runs.
+
+```ts
+const agent = new VoiceAgent({
+  // ...
+  tools: [{
+    definition: {
+      type: 'function',
+      function: {
+        name: 'get_weather',
+        description: 'Current weather for a city',
+        parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+      },
+    },
+    handler: async ({ city }, { signal }) => fetchWeather(city, signal),
+    timeoutMs: 10_000, // default 30 s
+  }],
+});
+```
+
+- The handler gets the parsed arguments and `{ signal, call }`. `signal` aborts on barge-in, when the agent stops, or at the timeout.
+- A string result goes to the model as is, anything else as JSON (at most 16,000 characters). A thrown error, invalid JSON arguments or a timeout go back as `{"error": "..."}`, so the model can say what went wrong.
+- Several calls in one reply run one after another. After three tool rounds in a turn the model is asked to answer without tools.
+- The call and its result stay in the conversation context as one entry, so later turns can refer to them.
+- A bare `ToolDefinition` (no handler) keeps the 0.8 behaviour: the agent emits `toolCall` and ends the turn, and the app answers with `say()`.
+
+## Latency metrics
+
+After each completed reply the agent emits `metrics` (milliseconds; `null` when a stage did not happen): `sttMs`, `queueMs`, `prepareMs`, `ttftMs`, `llmMs`, `ttsMs`, `overallMs`, `toolMs`, `toolCalls` and `speaker`. They are the values of the `LATENCY` log line described above. Aborted turns and `say()` emit none. When the first sentence comes after a tool call, `llmMs` and `overallMs` include the tool time. To show them on a page, publish them to the room:
+
+```ts
+agent.on('metrics', (m) => {
+  agent.room?.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({ type: 'metrics', ...m })), { topic: 'agent' });
+});
+```
 
 ## Custom Providers
 

@@ -20,9 +20,12 @@ import type {
   PipelineOptions,
   PipelineEvents,
   AgentState,
-  ToolDefinition,
+  Message,
+  ToolCallResult,
+  TurnMetrics,
 } from './types';
-import { ContextManager } from './context-manager';
+import { ContextManager, toolMessages, type ToolExchange } from './context-manager';
+import { MAX_TOOL_ROUNDS, runTool, toolSet, type ToolSet } from './tools';
 import { SentenceSplitter } from './sentence-splitter';
 import { TurnDetector } from './turn-detector';
 import { BargeIn } from './barge-in';
@@ -126,7 +129,7 @@ export class Pipeline extends EventEmitter {
   private readonly nameVariants: string[];
   private readonly beforeRespond?: (speaker: string, text: string) => boolean | Promise<boolean>;
   private readonly memory?: RoomMemory;
-  private readonly tools?: ToolDefinition[];
+  private readonly tools: ToolSet;
 
   /** Strip provider-specific markup (e.g. SSML lang tags) for display. */
   private cleanText(text: string): string {
@@ -154,7 +157,7 @@ export class Pipeline extends EventEmitter {
     this.nameVariants = (options.nameVariants ?? []).map((n) => n.toLowerCase());
     this.beforeRespond = options.beforeRespond;
     this.memory = options.memory;
-    this.tools = options.tools;
+    this.tools = toolSet(options.tools);
     this.context = new ContextManager({
       instructions: options.instructions,
       maxContextTokens: options.maxContextTokens,
@@ -387,8 +390,13 @@ export class Pipeline extends EventEmitter {
       }
       signal.throwIfAborted();
 
-      const messages = this.context.buildMessages(memoryContext || undefined);
+      // Grows with each tool round of this turn.
+      const messages: Message[] = this.context.buildMessages(memoryContext || undefined);
       let fullResponse = '';
+      // Text of the latest LLM round: the answer that goes into the context as the agent's turn.
+      let finalText = '';
+      let toolMs = 0;
+      let toolCalls = 0;
 
       this.setAgentState('thinking');
 
@@ -415,99 +423,137 @@ export class Pipeline extends EventEmitter {
       // ── Producer: consume LLM stream, split into sentences ──
       const MAX_LLM_RETRIES = 2;
 
-      let toolCallEmitted = false;
-
       const producer = async () => {
         const defaultLang = this.tts?.defaultLanguage;
 
-        for (let attempt = 0; attempt <= MAX_LLM_RETRIES; attempt++) {
-          if (signal.aborted) break;
+        for (let round = 0; !signal.aborted; round++) {
+          let roundText = '';
+          const roundCalls: ToolCallResult[] = [];
+          // After the last tool round the model must answer in text.
+          const toolChoice = round >= MAX_TOOL_ROUNDS && this.tools.definitions.length ? 'none' as const : undefined;
 
-          if (attempt > 0) {
-            log.warn(`LLM retry ${attempt}/${MAX_LLM_RETRIES}...`);
-            this.splitter.reset();
-          }
+          for (let attempt = 0; attempt <= MAX_LLM_RETRIES; attempt++) {
+            if (signal.aborted) break;
 
-          let isFirstChunk = true;
-          const segBuf: Array<{ lang: string; text: string }> = [];
+            if (attempt > 0) {
+              log.warn(`LLM retry ${attempt}/${MAX_LLM_RETRIES}...`);
+              this.splitter.reset();
+            }
 
-          const flushSegments = () => {
-            if (segBuf.length === 0) return;
+            let isFirstChunk = true;
+            const segBuf: Array<{ lang: string; text: string }> = [];
 
-            const combined = segBuf
-              .map((s) =>
-                s.lang !== defaultLang
-                  ? `<lang xml:lang="${s.lang}">${s.text}</lang>`
-                  : s.text,
-              )
-              .join(' ');
-            segBuf.length = 0;
-            pushSentence(combined);
-          };
+            const flushSegments = () => {
+              if (segBuf.length === 0) return;
 
-          const llmStream = this.llm.chat(messages, signal, { tools: this.tools });
-          try {
-            while (!signal.aborted) {
-              const { value: chunk, done } = await llmStream.next();
-              if (done || !chunk) break;
-              if (signal.aborted) break;
+              const combined = segBuf
+                .map((s) =>
+                  s.lang !== defaultLang
+                    ? `<lang xml:lang="${s.lang}">${s.text}</lang>`
+                    : s.text,
+                )
+                .join(' ');
+              segBuf.length = 0;
+              pushSentence(combined);
+            };
 
-              if (chunk.type === 'segment' && chunk.segment) {
-                // Structured output: accumulate segments, flush at sentence boundaries
-                if (isFirstChunk) {
-                  tLlmFirstToken = performance.now();
-                  isFirstChunk = false;
-                  log.info(`llm_first_segment: ${(tLlmFirstToken - tLlmStarted).toFixed(0)}ms`);
+            const llmStream = this.llm.chat(messages, signal, {
+              tools: this.tools.definitions.length ? this.tools.definitions : undefined,
+              toolChoice,
+            });
+            try {
+              while (!signal.aborted) {
+                const { value: chunk, done } = await llmStream.next();
+                if (done || !chunk) break;
+                if (signal.aborted) break;
+
+                if (chunk.type === 'segment' && chunk.segment) {
+                  // Structured output: accumulate segments, flush at sentence boundaries
+                  if (isFirstChunk) {
+                    isFirstChunk = false;
+                    if (!tLlmFirstToken) {
+                      tLlmFirstToken = performance.now();
+                      log.info(`llm_first_segment: ${(tLlmFirstToken - tLlmStarted).toFixed(0)}ms`);
+                    }
+                  }
+
+                  // Track clean text for context/memory (not JSON)
+                  if (fullResponse) fullResponse += ' ';
+                  fullResponse += chunk.segment.text;
+                  if (roundText) roundText += ' ';
+                  roundText += chunk.segment.text;
+
+                  segBuf.push(chunk.segment);
+
+                  // Flush at sentence boundaries (.!? optionally followed by quotes/parens)
+                  if (/[.!?]["'»)]*\s*$/.test(chunk.segment.text)) {
+                    flushSegments();
+                  }
+                } else if (chunk.type === 'token' && chunk.token) {
+                  // Plain text mode (no structured output)
+                  if (isFirstChunk) {
+                    isFirstChunk = false;
+                    if (!tLlmFirstToken) {
+                      tLlmFirstToken = performance.now();
+                      log.info(`llm_first_token: ${(tLlmFirstToken - tLlmStarted).toFixed(0)}ms`);
+                    }
+                  }
+
+                  fullResponse += chunk.token;
+                  roundText += chunk.token;
+
+                  const sentences = this.splitter.push(chunk.token);
+                  for (const sentence of sentences) {
+                    pushSentence(sentence);
+                  }
+                } else if (chunk.type === 'tool_call' && chunk.toolCall) {
+                  log.info(`Tool call: ${chunk.toolCall.name}(${chunk.toolCall.arguments})`);
+                  roundCalls.push(chunk.toolCall);
+                  toolCalls++;
+                  this.emit('toolCall', chunk.toolCall);
                 }
-
-                // Track clean text for context/memory (not JSON)
-                if (fullResponse) fullResponse += ' ';
-                fullResponse += chunk.segment.text;
-
-                segBuf.push(chunk.segment);
-
-                // Flush at sentence boundaries (.!? optionally followed by quotes/parens)
-                if (/[.!?]["'»)]*\s*$/.test(chunk.segment.text)) {
-                  flushSegments();
-                }
-              } else if (chunk.type === 'token' && chunk.token) {
-                // Plain text mode (no structured output)
-                if (isFirstChunk) {
-                  tLlmFirstToken = performance.now();
-                  isFirstChunk = false;
-                  log.info(`llm_first_token: ${(tLlmFirstToken - tLlmStarted).toFixed(0)}ms`);
-                }
-
-                fullResponse += chunk.token;
-
-                const sentences = this.splitter.push(chunk.token);
-                for (const sentence of sentences) {
-                  pushSentence(sentence);
-                }
-              } else if (chunk.type === 'tool_call' && chunk.toolCall) {
-                log.info(`Tool call: ${chunk.toolCall.name}(${chunk.toolCall.arguments})`);
-                toolCallEmitted = true;
-                this.emit('toolCall', chunk.toolCall);
               }
+            } finally {
+              await llmStream.return(undefined);
             }
-          } finally {
-            await llmStream.return(undefined);
+
+            // Flush remaining text
+            if (!signal.aborted) {
+              flushSegments();
+              const remaining = this.splitter.flush();
+              if (remaining) {
+                pushSentence(remaining);
+              }
+
+              if (roundText.trim() || roundCalls.length) {
+                break; // Got output or tool call — done
+              }
+
+              log.warn(`LLM produced no output (attempt ${attempt + 1}/${MAX_LLM_RETRIES + 1})`);
+            }
           }
 
-          // Flush remaining text
-          if (!signal.aborted) {
-            flushSegments();
-            const remaining = this.splitter.flush();
-            if (remaining) {
-              pushSentence(remaining);
-            }
+          if (signal.aborted) break;
+          finalText = roundText;
+          // Without calls, or when a tool has no handler (the app handles `toolCall`), the turn ends.
+          if (!roundCalls.length || toolChoice || !roundCalls.every((c) => this.tools.handlers.has(c.name))) break;
 
-            if (fullResponse.trim() || toolCallEmitted) {
-              break; // Got output or tool call — done
-            }
-
-            log.warn(`LLM produced no output (attempt ${attempt + 1}/${MAX_LLM_RETRIES + 1})`);
+          const toolsStarted = performance.now();
+          const results: ToolExchange['results'] = [];
+          for (const call of roundCalls) {
+            results.push({ id: call.id, content: await runTool(this.tools.handlers.get(call.name)!, call, signal) });
           }
+          toolMs += performance.now() - toolsStarted;
+          signal.throwIfAborted();
+          const exchange: ToolExchange = {
+            content: roundText.trim() || null,
+            calls: roundCalls.map((c) => ({ id: c.id, type: 'function' as const, function: { name: c.name, arguments: c.arguments } })),
+            results,
+          };
+          // Recorded now: the tools ran, so the model must know even if the answer is interrupted.
+          this.context.addToolExchange(exchange);
+          messages.push(...toolMessages(exchange));
+          finalText = '';
         }
 
         producerDone = true;
@@ -640,8 +686,23 @@ export class Pipeline extends EventEmitter {
         `Overall=${tFirstSentence ? `${overallMs.toFixed(0)}ms` : 'n/a (no text response)'}`,
       );
 
+      const round = (ms: number) => Math.round(ms);
+      const metrics: TurnMetrics = {
+        speaker,
+        sttMs: round(sttDuration),
+        queueMs: round(queueMs),
+        prepareMs: round(prepareMs),
+        ttftMs: tLlmFirstToken ? round(ttftMs) : null,
+        llmMs: tFirstSentence ? round(llmMs) : null,
+        ttsMs: tFirstAudioPlayed && tFirstSentence ? round(ttsMs) : null,
+        overallMs: tFirstSentence ? round(overallMs) : null,
+        toolMs: round(toolMs),
+        toolCalls,
+      };
+      this.emit('metrics', metrics);
+
+      if (finalText.trim()) this.context.addAgentTurn(finalText.trim());
       if (fullResponse.trim()) {
-        this.context.addAgentTurn(fullResponse.trim());
         this.memory?.storeTurn('assistant', fullResponse.trim(), true);
         this.emit('response', this.cleanText(fullResponse.trim()));
       }
