@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+# Hosted runners use the CPU provider included in the optional memory dev dependency.
+env:
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+
 jobs:
   package:
     name: Package on Node ${{ matrix.node }}
@@ -26,6 +30,8 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - name: Verify the bundled ONNX CPU provider
+        run: node -e "require('node:assert/strict').ok(require('onnxruntime-node').listSupportedBackends().some(b => b.name === 'cpu' && b.bundled))"
       - run: npm run lint
       - run: npm test
       - run: npm run build
