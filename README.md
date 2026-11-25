@@ -397,6 +397,12 @@ and SSML gain, before PCM16/Opus. It adds an 80 ms input buffer and approximatel
 No filter or resampling is applied after watermarking. Short/interrupted speech
 may not remain detectable. This option is off by default even on capable servers.
 
+## CI and live verification
+
+`SDK checks` runs lint, tests and a build on Node 22.14.0 and 24.x. It installs the resulting npm tarball in an empty consumer project and checks the agent and speech provider exports. To repeat the package check locally, run `npm ci && npm run build`, then `bash test-support/prepare-consumer.sh "$(mktemp -d)"`.
+
+To run the hosted media test, dispatch **SDK checks** on `main`. Configure the `sdk-live-tests` GitHub environment with `DTELECOM_CLOUD_URL`, `DTELECOM_API_KEY` and `DTELECOM_API_SECRET` and an `OPENROUTER_API_KEY` for the model. Use a Cloud project funded for WebRTC, STT and TTS. Chromium publishes a synthesized question. The test checks the recognized subject, the model's answer and audible audio received from the assistant. The job disconnects the participants after the call.
+
 ## License
 
 Apache-2.0
