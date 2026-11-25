@@ -32,27 +32,60 @@ npm install @dtelecom/agents-js @dtelecom/server-sdk-js @dtelecom/server-sdk-nod
 
 Requires Node.js 22 or later.
 
-## Quick Start: dTelecom Cloud (0.7.0+)
+## Quick start with dTelecom Cloud
 
-With a dTelecom Cloud project, give the agent and the dTelecom providers one `CloudClient` from `@dtelecom/server-sdk-js` 4.1 or newer. The agent mints its own WebRTC token; the providers open their speech sessions, link them to the agent's room session, and extend them before they run out.
+You need a dTelecom Cloud project with balance for WebRTC, STT and TTS, and a separate OpenRouter API key for the language model. In the directory where you installed the packages above, create a backend-only `.env` file and fill in your keys.
 
-```ts
-import { CloudClient } from '@dtelecom/server-sdk-js';
-import { VoiceAgent } from '@dtelecom/agents-js';
-import { DtelecomSTT, DtelecomTTS } from '@dtelecom/agents-js/providers';
-
-// DTELECOM_API_KEY, DTELECOM_API_SECRET and DTELECOM_CLOUD_URL from the environment
-const cloud = new CloudClient();
-
-const agent = new VoiceAgent({
-  stt: new DtelecomSTT({ cloud, language: 'en', partials: true, smartTurn: true }),
-  tts: new DtelecomTTS({ cloud, voices: { en: { voice: 'af_heart', langCode: 'a' } } }),
-  llm, instructions: 'Be helpful and concise.',
-});
-await agent.start({ room: 'voice-demo', identity: 'assistant', cloud, ttl: '2h' });
+```dotenv
+DTELECOM_CLOUD_URL=https://cloud.dtelecom.org
+DTELECOM_API_KEY=
+DTELECOM_API_SECRET=
+OPENROUTER_API_KEY=
 ```
 
-Your backend gives each human participant a token with `cloud.createToken`. How the sessions work:
+Save the following as `agent.mjs`. The agent and both speech providers share one Cloud client. The agent obtains its own room token and the speech sessions are linked to it.
+
+```js
+import { CloudClient } from '@dtelecom/server-sdk-js';
+import { VoiceAgent } from '@dtelecom/agents-js';
+import { DtelecomSTT, DtelecomTTS, OpenRouterLLM } from '@dtelecom/agents-js/providers';
+
+async function main() {
+  const cloud = new CloudClient();
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error('Set OPENROUTER_API_KEY for the language model');
+
+  const agent = new VoiceAgent({
+    stt: new DtelecomSTT({ cloud, language: 'en', partials: true, smartTurn: true }),
+    llm: new OpenRouterLLM({ apiKey, model: 'openai/gpt-4o-mini', maxTokens: 120 }),
+    tts: new DtelecomTTS({ cloud, voices: { en: { voice: 'af_heart', langCode: 'a' } } }),
+    instructions: 'Answer in one or two short sentences.',
+    respondMode: 'always',
+  });
+  agent.on('transcription', ({ text, isFinal }) => {
+    if (isFinal) console.log('Heard:', text);
+  });
+  agent.on('response', (text) => console.log('Assistant:', text));
+  agent.on('error', (error) => console.error('Agent error:', error.message));
+
+  const room = process.env.ROOM_NAME || 'voice-demo';
+  await agent.start({ room, identity: 'assistant', cloud, ttl: '10m' });
+  console.log(`Listening in ${room}. Press Ctrl+C to disconnect.`);
+  process.once('SIGINT', async () => {
+    await agent.stop();
+    process.exit(0);
+  });
+}
+
+main().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
+});
+```
+
+Run `node --env-file=.env agent.mjs`. Join `voice-demo` from a browser in the same Cloud project using a different participant identity. Enable the microphone and audio playback, then ask a question. The terminal shows the final transcript and reply, and the browser plays the answer. Press Ctrl+C to stop the agent. [Browser quickstart](https://docs.dtelecom.org/quickstart/) · [Runnable source](examples/basic-agent.ts)
+
+How the sessions work:
 
 - **STT**: one session per participant stream, billed per connected minute. Each holds 10 minutes of balance and is extended by 10 minutes when under 2 remain. Change it with `cloudSession: { minutes, extendWhenMinutesLeft }`.
 - **TTS**: one session for the agent's voice, billed per character. It holds 2,000 characters and is extended before a sentence would leave fewer than 500, and before its 30-minute window closes. Change it with `cloudSession: { characters, extendWhenCharactersLeft }`.
