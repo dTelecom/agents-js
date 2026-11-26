@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.0 — 2026-11-26
+
+- Voice agents can connect to the next node when the primary is unavailable. Cloud supplies the ranked signaling URLs. For a pre-signed token, pass the issuer's `fallbackUrls` alongside `wsUrl`.
+- When Cloud extends a session, the agent uses the renewed token for reconnects. This release requires `@dtelecom/server-sdk-node` 0.4.0 or later and `@dtelecom/server-sdk-js` 4.4.0 or later.
+
 ## 0.9.1 — 2026-11-24
 
 - Speech no longer breaks numbers apart. A sentence now ends at `.`, `!`, `?` or `؟` followed by a space (or at 。！？।, which need none), so decimals, versions and domains such as `$0.004`, `4.2.1` and `docs.dtelecom.org` reach TTS whole, whatever the token boundaries. Before, a reply streamed as "costs $0." + "004 per minute" was spoken as two sentences. A period after common abbreviations (e.g., i.e., Dr.) does not end a sentence.
