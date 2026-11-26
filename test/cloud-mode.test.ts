@@ -13,13 +13,17 @@ import { MockLLM, MockSTT, MockTTS } from './helpers/mock-providers';
 
 vi.mock('../src/utils/logger', () => ({ createLogger: () => ({ debug() {}, info() {}, warn() {}, error() {} }) }));
 
-const connects: Array<{ url: string; token: string }> = [];
+const connects: Array<{ url: string; token: string; fallbackUrls?: string[] }> = [];
+const tokenUpdates: Array<{ token: string; fallbackUrls?: string[] }> = [];
 vi.mock('@dtelecom/server-sdk-node', () => ({
   Room: class {
     remoteParticipants = new Map();
     localParticipant = { async publishTrack() {}, async unpublishTrack() {} };
     on() {}
-    async connect(url: string, token: string) { connects.push({ url, token }); }
+    async connect(url: string, token: string, options: { fallbackUrls?: string[] }) {
+      connects.push({ url, token, fallbackUrls: options.fallbackUrls });
+    }
+    updateConnectionToken(token: string, fallbackUrls?: string[]) { tokenUpdates.push({ token, fallbackUrls }); }
     async disconnect() {}
   },
   LocalAudioTrack: { createAudioTrack: () => ({}) },
@@ -65,11 +69,11 @@ function fakeCloud(serverUrl = 'https://speech.example', ttlMs = 10 * 60_000, to
     },
     createToken: vi.fn(async (o: any) => {
       calls.push(['createToken', o]);
-      return { token: 'agent-token', wsUrl: 'wss://node.example', sessionId: 'webrtc-1', expiresAt: new Date(Date.now() + tokenTtlMs) };
+      return { token: 'agent-token', wsUrl: 'wss://node.example', fallbackUrls: ['wss://node.example', 'wss://b.example'], sessionId: 'webrtc-1', expiresAt: new Date(Date.now() + tokenTtlMs) };
     }),
     extendToken: vi.fn(async (id: string, seconds: number) => {
       calls.push(['extendToken', { id, seconds }]);
-      return { token: `agent-token-${calls.length}`, wsUrl: 'wss://node.example', expiresAt: new Date(Date.now() + seconds * 1000) };
+      return { token: `agent-token-${calls.length}`, wsUrl: 'wss://node.example', fallbackUrls: ['wss://node.example', 'wss://c.example'], expiresAt: new Date(Date.now() + seconds * 1000) };
     }),
   };
   return { cloud: cloud as unknown as CloudClient, calls };
@@ -241,7 +245,7 @@ describe('RoomConnection in cloud mode', () => {
     const connection = new RoomConnection();
     await connection.connect({ room: 'demo', identity: 'agent', name: 'Agent', cloud, ttl: '2h' });
     expect(calls[0]).toEqual(['createToken', { room: 'demo', identity: 'agent', name: 'Agent', ttl: '2h' }]);
-    expect(connects[connects.length - 1]).toEqual({ url: 'wss://node.example', token: 'agent-token' });
+    expect(connects[connects.length - 1]).toEqual({ url: 'wss://node.example', token: 'agent-token', fallbackUrls: ['wss://node.example', 'wss://b.example'] });
     expect(connection.webrtcSessionId).toBe('webrtc-1');
   });
 
@@ -268,6 +272,14 @@ describe('RoomConnection in cloud mode', () => {
     expect(requests[0].auth).toBe('Bearer k:s');
     expect(requests[0].body).toMatchObject({ room_name: 'demo', identity: 'bot', name: 'bot' });
     expect(connection.webrtcSessionId).toBe('webrtc-9');
+  });
+
+  it('passes through a pre-signed issuer list without requesting another token', async () => {
+    const connection = new RoomConnection();
+    const fallbackUrls = ['wss://node-a.example', 'wss://node-b.example'];
+    await connection.connect({ room: 'demo', token: 'pre-signed', wsUrl: fallbackUrls[0], fallbackUrls });
+    expect(connects.at(-1)).toEqual({ url: fallbackUrls[0], token: 'pre-signed', fallbackUrls });
+    await connection.disconnect();
   });
 
   it('keeps the x402 token mode unchanged', async () => {
@@ -311,6 +323,7 @@ describe('the agent token in cloud mode', () => {
     expect(calls.filter(([name]) => name === 'extendToken')).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(1);
     expect(calls.filter(([name]) => name === 'extendToken')).toEqual([['extendToken', { id: 'webrtc-1', seconds: 7200 }]]);
+    expect(tokenUpdates.at(-1)).toEqual({ token: connection.token, fallbackUrls: ['wss://node.example', 'wss://c.example'] });
     expect(connection.token).toMatch(/^agent-token-/);
 
     await vi.advanceTimersByTimeAsync(120 * minute);

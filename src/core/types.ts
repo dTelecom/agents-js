@@ -212,6 +212,8 @@ export interface AgentStartOptions {
   // Mode 3: Use pre-signed token from x402 gateway
   token?: string;
   wsUrl?: string;
+  /** Ranked signaling URLs returned with a pre-signed grant. */
+  fallbackUrls?: string[];
 }
 
 // ─── Data Channel ────────────────────────────────────────────────────────────

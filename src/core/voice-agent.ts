@@ -106,6 +106,7 @@ export class VoiceAgent extends EventEmitter {
       apiSecret: options.apiSecret,
       token: options.token,
       wsUrl: options.wsUrl,
+      fallbackUrls: options.fallbackUrls,
       identity: options.identity ?? 'agent',
       name: options.name ?? options.identity ?? 'AI Agent',
       onError: (error) => this.emit('error', error),

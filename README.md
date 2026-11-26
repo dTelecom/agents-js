@@ -156,6 +156,8 @@ The client joins with `session.webrtc.client`. STT is $0.004/connected session m
 
 This framework runs live voice agents. Translation, file transcription/diarization, WAV jobs, vision and moderation use the separate [x402 client SDK](https://github.com/dTelecom/x402-client); they are not automatically invoked by VoiceAgent.
 
+Cloud mode forwards the issuer’s ranked signaling endpoints and replaces the reconnect credential when the session is extended. With a pre-signed token, pass the optional issuer-provided `fallbackUrls` array alongside `wsUrl`. A single URL is sufficient when the issuer supplies only one node.
+
 ## Plugin Interfaces
 
 ### STT

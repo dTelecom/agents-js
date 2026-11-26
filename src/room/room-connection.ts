@@ -33,6 +33,8 @@ export interface RoomConnectionOptions {
   // Mode 3: Use pre-signed token from x402 gateway
   token?: string;
   wsUrl?: string;
+  /** Ranked signaling URLs returned with a pre-signed grant. */
+  fallbackUrls?: string[];
 }
 
 export class RoomConnection {
@@ -74,11 +76,13 @@ export class RoomConnection {
 
     let jwt: string;
     let wsUrl: string;
+    let fallbackUrls: string[] | undefined;
 
     if (options.token && options.wsUrl) {
       // Mode 3: Use pre-signed token from x402 gateway
       jwt = options.token;
       wsUrl = options.wsUrl;
+      fallbackUrls = options.fallbackUrls;
     } else if (options.cloud || (options.apiKey && options.apiSecret)) {
       // Modes 1 and 2: dTelecom Cloud. Default grants: publish, subscribe and data.
       let cloud = options.cloud;
@@ -89,6 +93,7 @@ export class RoomConnection {
       const issued = await cloud.createToken({ room: roomName, identity, name: name ?? identity, ttl: options.ttl });
       jwt = issued.token;
       wsUrl = issued.wsUrl;
+      fallbackUrls = issued.fallbackUrls;
       this.webrtcSessionId = issued.sessionId;
       this.token = issued.token;
       this.cloud = cloud;
@@ -103,12 +108,13 @@ export class RoomConnection {
     log.info(`SFU URL: ${wsUrl}`);
 
     // Connect
-    await this.room.connect(wsUrl, jwt, { autoSubscribe: true });
+    await this.room.connect(wsUrl, jwt, { autoSubscribe: true, fallbackUrls });
     this._connected = true;
-    if (this.cloud) {
-      this.room.on('disconnected', () => this.stopExtending());
-      this.scheduleExtension();
-    }
+    this.room.on('disconnected', () => {
+      this._connected = false;
+      this.stopExtending();
+    });
+    if (this.cloud) this.scheduleExtension();
 
     log.info('Connected successfully');
   }
@@ -158,7 +164,9 @@ export class RoomConnection {
     if (!this.cloud || !this.webrtcSessionId || !this._connected) return;
     try {
       const extended = await this.cloud.extendToken(this.webrtcSessionId, this.extendSeconds);
+      if (!this._connected) return;
       this.token = extended.token;
+      this.room.updateConnectionToken(extended.token, extended.fallbackUrls);
       this.expiresAt = extended.expiresAt.getTime();
       log.info(`Agent token extended until ${extended.expiresAt.toISOString()}`);
       this.extendFailing = false;
@@ -179,10 +187,8 @@ export class RoomConnection {
   /** Disconnect from the room and clean up resources. */
   async disconnect(): Promise<void> {
     this.stopExtending();
-    if (!this._connected) return;
-
     if (this.localTrack) {
-      await this.room.localParticipant.unpublishTrack(this.localTrack);
+      if (this.room.isConnected) await this.room.localParticipant.unpublishTrack(this.localTrack);
       this.localTrack = null;
     }
 
