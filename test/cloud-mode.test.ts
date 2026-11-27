@@ -142,20 +142,65 @@ describe('CloudSpeechSession', () => {
     session.close();
   });
 
-  it('reserves TTS characters, extending before a text passes the limit', async () => {
+  it('extends TTS characters in the background before the hold runs low; only a text past the hold waits', async () => {
     const { cloud, calls } = fakeCloud();
+    let release!: () => void;
+    const extend = cloud.tts.extend as any;
+    const original = extend.getMockImplementation();
+    extend.mockImplementationOnce(async (...args: unknown[]) => {
+      const result = original(...args);
+      await new Promise<void>((resolve) => { release = resolve; });
+      return result;
+    });
+    const keys: string[] = [];
     const session = new CloudSpeechSession({
-      kind: 'tts', cloud, language: 'en', voice: 'af_heart', onExtended: () => {}, onError: () => {},
+      kind: 'tts', cloud, language: 'en', voice: 'af_heart', onExtended: (key) => keys.push(key), onError: () => {},
     });
     await session.open('webrtc-1');
     expect(calls[0]).toEqual(['tts.createSession', { maxCharacters: 2000, language: 'en', voice: 'af_heart', webrtcSessionId: 'webrtc-1' }]);
 
     await session.reserveCharacters(1400); // 600 left: above the 500 threshold
     expect(cloud.tts.extend).not.toHaveBeenCalled();
-    await session.reserveCharacters(200); // would leave 400
+    await session.reserveCharacters(200); // 400 left: extends in the background, the text does not wait
     expect(calls[1]).toEqual(['tts.extend', { id: 'tts-1', characters: 2000 }]);
+    await session.reserveCharacters(300); // still fits in the hold while the extension runs
+    expect(cloud.tts.extend).toHaveBeenCalledTimes(1);
+    expect(keys).toEqual([]);
+
+    let reserved = false;
+    const pastHold = session.reserveCharacters(200).then(() => { reserved = true; }); // 2100 > 2000: waits
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(reserved).toBe(false);
+    release();
+    await pastHold;
+    expect(keys).toEqual([session.token]);
+    expect(cloud.tts.extend).toHaveBeenCalledTimes(1);
+
     await session.reserveCharacters(6000); // a long text: one extension covers it
-    expect(calls[2]).toEqual(['tts.extend', { id: 'tts-1', characters: 4100 }]);
+    expect(calls[2]).toEqual(['tts.extend', { id: 'tts-1', characters: 4600 }]);
+    session.close();
+  });
+
+  it('a failed background extension is reported; a text past the hold still gets an extension or fails', async () => {
+    const { cloud } = fakeCloud();
+    const extend = cloud.tts.extend as any;
+    extend.mockRejectedValueOnce(new Error('insufficient_balance'));
+    const errors: Error[] = [];
+    const session = new CloudSpeechSession({
+      kind: 'tts', cloud, onExtended: () => {}, onError: (e) => errors.push(e),
+    });
+    await session.open();
+
+    await session.reserveCharacters(1600); // 400 left: the background extension fails
+    await vi.waitFor(() => expect(errors.map((e) => e.message)).toEqual(['insufficient_balance']));
+    await session.reserveCharacters(300); // fits: sent without waiting, no immediate retry
+    expect(extend).toHaveBeenCalledTimes(1);
+
+    await session.reserveCharacters(200); // 2100 > 2000: waits for an extension, which succeeds
+    expect(extend).toHaveBeenCalledTimes(2);
+
+    extend.mockRejectedValueOnce(new Error('insufficient_balance'));
+    await expect(session.reserveCharacters(5000)).rejects.toThrow('insufficient_balance'); // past the hold, refused
     session.close();
   });
 
@@ -208,7 +253,7 @@ describe('DtelecomSTT in cloud mode', () => {
 });
 
 describe('DtelecomTTS in cloud mode', () => {
-  it('opens a session on first use and extends before sending a text past the limit', async () => {
+  it('opens a session on first use, extends in the background and holds back only a text past the limit', async () => {
     const server = await speechServer((ws, message) => {
       if (message.text) {
         ws.send(JSON.stringify({ type: 'generating', text: message.text }));
@@ -229,12 +274,29 @@ describe('DtelecomTTS in cloud mode', () => {
     expect(calls[0]).toEqual(['tts.createSession', { maxCharacters: 100, language: 'en', voice: 'af_heart', webrtcSessionId: 'webrtc-1' }]);
     expect(server.connections[0][0].session_key).toBe('tts-key-1');
 
-    await collect('x'.repeat(80)); // 11 + 80 would leave 9, under 20
+    // 11 + 80 leaves 9, under 20: the text is spoken at once while the hold is extended in the background.
+    let release!: () => void;
+    const extend = cloud.tts.extend as any;
+    const original = extend.getMockImplementation();
+    extend.mockImplementationOnce(async (...args: unknown[]) => {
+      const result = original(...args);
+      await new Promise<void>((resolve) => { release = resolve; });
+      return result;
+    });
+    expect(await collect('x'.repeat(80))).toEqual([Buffer.from([1, 0])]);
     const messages = server.connections[0];
+    expect(calls.filter(([name]) => name === 'tts.extend')).toHaveLength(1);
+    expect(messages.some((m) => m.type === 'extend')).toBe(false);
+
+    // A text past the hold waits for the extension; the new key reaches the socket before it.
+    const pastHold = collect('y'.repeat(15));
+    release();
+    expect(await pastHold).toEqual([Buffer.from([1, 0])]);
     const extendAt = messages.findIndex((m) => m.type === 'extend');
-    const textAt = messages.findIndex((m) => m.text === 'x'.repeat(80));
+    const textAt = messages.findIndex((m) => m.text === 'y'.repeat(15));
     expect(extendAt).toBeGreaterThan(0);
     expect(extendAt).toBeLessThan(textAt);
+    expect(messages[extendAt].session_key).toMatch(/^tts-1-ext-/);
     expect(calls.filter(([name]) => name === 'tts.extend')).toHaveLength(1);
   });
 });

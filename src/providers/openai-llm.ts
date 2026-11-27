@@ -11,6 +11,11 @@ import { createLogger } from '../utils/logger';
 const log = createLogger('OpenAILLM');
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+/**
+ * Output limit of the warmup request: it only primes the connection and the provider's prompt
+ * cache, so the reply itself is not needed. 16 is the lowest limit OpenAI's newer endpoints accept.
+ */
+const WARMUP_MAX_TOKENS = 16;
 
 export interface OpenAILLMOptions {
   apiKey: string;
@@ -59,7 +64,7 @@ export class OpenAILLM implements LLMPlugin {
     ];
 
     try {
-      const gen = this.chat(messages);
+      const gen = this.chat(messages, undefined, { maxTokens: WARMUP_MAX_TOKENS });
       for await (const chunk of gen) {
         if (chunk.type === 'done') break;
       }
@@ -73,7 +78,7 @@ export class OpenAILLM implements LLMPlugin {
     const body: Record<string, unknown> = {
       model: this.model,
       messages,
-      max_tokens: this.maxTokens,
+      max_tokens: options?.maxTokens ?? this.maxTokens,
       temperature: this.temperature,
       stream: true,
       stream_options: { include_usage: true },

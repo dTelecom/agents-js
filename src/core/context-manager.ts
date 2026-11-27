@@ -11,7 +11,10 @@ function estimateTokens(text: string): number {
 export interface ContextManagerOptions {
   /** System instructions for the agent */
   instructions: string;
-  /** Max tokens before triggering summarization (default: 5000) */
+  /**
+   * Conversation size, in estimated tokens, above which older turns are summarized (default: 5000).
+   * Counts the turns and the current summary; the instructions are not counted.
+   */
   maxContextTokens?: number;
   /** Number of recent turns to keep verbatim (default: 4) */
   recentTurnsToKeep?: number;
@@ -41,6 +44,9 @@ export class ContextManager {
 
   private turns: Turn[] = [];
   private summary: string | null = null;
+  /** Bumped by reset(): a summary started before it is discarded. */
+  private generation = 0;
+  private summarizing = false;
 
   constructor(options: ContextManagerOptions) {
     this.instructions = options.instructions;
@@ -92,7 +98,7 @@ export class ContextManager {
    * [system prompt]
    * [memory context, if provided]
    * [conversation summary, if any]
-   * [recent verbatim turns]
+   * [turns not yet summarized, verbatim]
    *
    * @param memoryContext - Optional relevant context injected by the application
    */
@@ -118,12 +124,8 @@ export class ContextManager {
       });
     }
 
-    // Format turns as messages
-    const turnsToInclude = this.summary
-      ? this.turns.slice(-this.recentTurnsToKeep)
-      : this.turns;
-
-    for (const turn of turnsToInclude) {
+    // The summary covers only the turns it replaced: every remaining turn is sent verbatim.
+    for (const turn of this.turns) {
       if (turn.tool) {
         messages.push(...toolMessages(turn.tool));
       } else if (turn.isAgent) {
@@ -139,53 +141,77 @@ export class ContextManager {
     return messages;
   }
 
-  /** Check if summarization should be triggered */
+  /**
+   * Whether the conversation (turns plus the current summary) is over `maxContextTokens`.
+   * The instructions are sent with every request either way, so they are not counted.
+   */
   shouldSummarize(): boolean {
     const totalTokens = this.turns.reduce(
       (acc, t) => acc + estimateTokens(t.text) + 10,
-      estimateTokens(this.instructions),
+      this.summary ? estimateTokens(this.summary) : 0,
     );
     return totalTokens > this.maxContextTokens;
   }
 
   /**
-   * Summarize older turns using the LLM.
-   * Keeps the most recent turns verbatim.
+   * Summarize older turns using the LLM, keeping the most recent turns verbatim. The new summary
+   * covers the previous one and replaces it.
+   *
+   * Turns added while the summary is generated are kept: only the turns it covers are removed.
+   * One summary runs at a time (a concurrent call returns false); a reset() during the call
+   * discards its result. Resolves true when a summary was committed. Rejects on cancellation,
+   * on a provider error and on an empty summary, leaving the context unchanged.
    */
-  async summarize(llm: LLMPlugin, signal?: AbortSignal): Promise<void> {
+  async summarize(llm: LLMPlugin, signal?: AbortSignal): Promise<boolean> {
     signal?.throwIfAborted();
-    if (this.turns.length <= this.recentTurnsToKeep) return;
+    const count = this.turns.length - this.recentTurnsToKeep;
+    if (count <= 0 || this.summarizing) return false;
 
-    const olderTurns = this.turns.slice(0, -this.recentTurnsToKeep);
-    const transcript = olderTurns
-      .map((t) => `[${t.speaker}]: ${t.text}`)
-      .join('\n');
+    this.summarizing = true;
+    try {
+      const generation = this.generation;
+      const transcript = this.turns
+        .slice(0, count)
+        .map((t) => `[${t.speaker}]: ${t.text}`)
+        .join('\n');
+      const previous = this.summary;
 
-    const summaryPrompt: Message[] = [
-      {
-        role: 'system',
-        content: 'Summarize this conversation concisely, preserving key facts, decisions, and action items.',
-      },
-      { role: 'user', content: transcript },
-    ];
+      const summaryPrompt: Message[] = [
+        {
+          role: 'system',
+          content: 'Summarize this conversation concisely, preserving key facts, decisions, and action items. ' +
+            'When a summary so far is given, write one summary that covers it and the new turns.',
+        },
+        {
+          role: 'user',
+          content: previous ? `Summary so far:\n${previous}\n\nNew turns:\n${transcript}` : transcript,
+        },
+      ];
 
-    let summaryText = '';
-    for await (const chunk of llm.chat(summaryPrompt, signal)) {
-      signal?.throwIfAborted();
-      if (chunk.type === 'token' && chunk.token) {
-        summaryText += chunk.token;
+      let summaryText = '';
+      for await (const chunk of llm.chat(summaryPrompt, signal, { plainText: true })) {
+        signal?.throwIfAborted();
+        if (chunk.type === 'token' && chunk.token) {
+          summaryText += chunk.token;
+        }
       }
+
+      // Some providers finish quietly on cancellation. Never commit their partial summary.
+      signal?.throwIfAborted();
+      if (generation !== this.generation) {
+        log.info('Discarded a summary started before the context was reset');
+        return false;
+      }
+      // An empty summary would drop the previous one together with the turns.
+      if (!summaryText.trim()) throw new Error('Summary was empty');
+
+      this.summary = summaryText.trim();
+      this.turns = this.turns.slice(count);
+      log.info(`Summarized ${count} turns, ${this.turns.length} turns kept`);
+      return true;
+    } finally {
+      this.summarizing = false;
     }
-
-    // Some providers finish quietly on cancellation. Never commit their partial summary.
-    signal?.throwIfAborted();
-    this.summary = this.summary
-      ? `${this.summary}\n\n${summaryText}`
-      : summaryText;
-
-    this.turns = this.turns.slice(-this.recentTurnsToKeep);
-
-    log.info(`Summarized ${olderTurns.length} turns, ${this.turns.length} recent turns kept`);
   }
 
   /** Get the full transcript */
@@ -197,6 +223,7 @@ export class ContextManager {
   reset(): void {
     this.turns = [];
     this.summary = null;
+    this.generation++;
   }
 }
 

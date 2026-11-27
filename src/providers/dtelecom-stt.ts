@@ -12,6 +12,8 @@
  * - Keepalive via {"type":"ping"} / {"type":"pong"}
  * - Mid-session reconfigure: send {"type":"config","language":"es","model":"whisper"} at any time
  * - Extension: send {"type":"extend","session_key":"..."} with a new key before the session expires
+ * - Finalize: send {"type":"finalize"} to end the current utterance now; sent only when the ready
+ *   message carries finalize: true (older servers do not, and finalize() does nothing there)
  *
  * Two ways to authorise: a fixed `serverUrl` + `sessionKey` (x402), or `cloud`, a dTelecom Cloud
  * client. With `cloud`, every stream (one per participant) opens its own STT session, linked to
@@ -97,6 +99,8 @@ class DtelecomSTTStream extends BaseSTTStream {
   private readonly partials: boolean | undefined;
   private readonly smartTurn: boolean | undefined;
   private _ready = false;
+  /** The connected server advertised finalize in its ready message. */
+  private finalizeSupported = false;
   private _closed = false;
   private pendingAudio: Buffer[] = [];
   private pendingBytes = 0;
@@ -230,10 +234,24 @@ class DtelecomSTTStream extends BaseSTTStream {
     }
   }
 
+  /**
+   * Ask the server to end the current utterance now and send its final transcript, instead of
+   * waiting for the end-of-speech silence. A no-op (returns false) unless the connected server
+   * advertised `finalize: true` in its ready message. The pipeline does not call it yet.
+   */
+  finalize(): boolean {
+    if (this._closed || !this._ready || !this.finalizeSupported || this.ws?.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    this.ws.send(JSON.stringify({ type: 'finalize' }));
+    return true;
+  }
+
   async close(): Promise<void> {
     if (this._closed) return;
     this._closed = true;
     this._ready = false;
+    this.finalizeSupported = false;
     this.pendingAudio = [];
     this.pendingBytes = 0;
     this.stopKeepAlive();
@@ -288,6 +306,7 @@ class DtelecomSTTStream extends BaseSTTStream {
     this.ws.on('close', (code, reason) => {
       log.debug(`dTelecom STT WebSocket closed: ${code} ${reason.toString()}`);
       this._ready = false;
+      this.finalizeSupported = false;
       this.stopKeepAlive();
 
       // Reconnect with a new session key unless closed on purpose: a key serves one connection.
@@ -342,11 +361,13 @@ class DtelecomSTTStream extends BaseSTTStream {
     log.info(`dTelecom STT ready: client_id=${clientId}, language=${lang}`);
 
     this._ready = true;
+    this.finalizeSupported = msg.finalize === true;
     this.reconnectAttempts = 0;
     this.emit('ready', {
       clientId, language: lang,
       ...(msg.smart_turn === 'active' || msg.smart_turn === 'acoustic_fallback'
         ? { smartTurn: msg.smart_turn } : {}),
+      ...(this.finalizeSupported ? { finalize: true } : {}),
     });
 
     // Flush pending audio

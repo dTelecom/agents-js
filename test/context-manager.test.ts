@@ -1,6 +1,37 @@
 import { describe, it, expect } from 'vitest';
 import { ContextManager } from '../src/core/context-manager';
+import type { LLMPlugin, Message } from '../src/core/types';
 import { MockLLM } from './helpers/mock-providers';
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(r => { resolve = r; });
+  return { promise, resolve };
+}
+
+/** An LLM whose summary waits for `gate` before it streams `text`. */
+function gatedSummaryLLM(text: string) {
+  const gate = deferred();
+  const calls: Message[][] = [];
+  const options: unknown[] = [];
+  const llm: LLMPlugin = {
+    async *chat(messages, _signal, chatOptions) {
+      calls.push(messages);
+      options.push(chatOptions);
+      await gate.promise;
+      yield { type: 'token', token: text };
+      yield { type: 'done' };
+    },
+  };
+  return { llm, calls, options, release: gate.resolve };
+}
+
+function addTurns(cm: ContextManager, n: number, prefix = 'Turn') {
+  for (let i = 0; i < n; i++) {
+    if (i % 2 === 0) cm.addUserTurn('Alice', `${prefix} ${i}`);
+    else cm.addAgentTurn(`${prefix} ${i}`);
+  }
+}
 
 describe('ContextManager', () => {
   const instructions = 'You are a helpful tutor.';
@@ -84,6 +115,104 @@ describe('ContextManager', () => {
     const summaryMsg = messages.find((m) => m.content.includes('Conversation summary'));
     expect(summaryMsg).toBeDefined();
     expect(summaryMsg!.content).toContain('Summary of the conversation so far.');
+  });
+
+  it('does not count the instructions: long instructions with a short history need no summary', () => {
+    // ~10,000 estimated tokens of instructions, twice the budget.
+    const cm = new ContextManager({ instructions: 'x'.repeat(40_000), maxContextTokens: 5000 });
+    addTurns(cm, 6);
+    expect(cm.shouldSummarize()).toBe(false);
+  });
+
+  it('counts the current summary with the turns', async () => {
+    const cm = new ContextManager({ instructions, maxContextTokens: 100, recentTurnsToKeep: 1 });
+    addTurns(cm, 3);
+    await cm.summarize(new MockLLM('S'.repeat(400)));
+    // One short turn is left; the 100-token summary alone passes the budget.
+    expect(cm.shouldSummarize()).toBe(true);
+  });
+
+  it('replaces the previous summary with one that covers it', async () => {
+    const cm = new ContextManager({ instructions, recentTurnsToKeep: 2 });
+    addTurns(cm, 4, 'First');
+    const first = new MockLLM('First summary.');
+    expect(await cm.summarize(first)).toBe(true);
+    expect(first.calls[0][1].content).toBe('[Alice]: First 0\n[assistant]: First 1');
+
+    addTurns(cm, 2, 'Second');
+    const second = new MockLLM('Combined summary.');
+    await cm.summarize(second);
+    expect(second.calls[0][1].content).toBe(
+      'Summary so far:\nFirst summary.\n\nNew turns:\n[Alice]: First 2\n[assistant]: First 3',
+    );
+    const summaries = cm.buildMessages().filter(m => m.content?.includes('Conversation summary'));
+    expect(summaries).toEqual([{ role: 'system', content: 'Conversation summary so far:\nCombined summary.' }]);
+    expect(cm.buildMessages().slice(2).map(m => m.content)).toEqual(['[Alice]: Second 0', 'Second 1']);
+  });
+
+  it('asks for plain text, so structured-output providers can summarize', async () => {
+    const cm = new ContextManager({ instructions, recentTurnsToKeep: 1 });
+    addTurns(cm, 3);
+    const { llm, options, release } = gatedSummaryLLM('Summary.');
+    release();
+    await cm.summarize(llm);
+    expect(options).toEqual([{ plainText: true }]);
+  });
+
+  it('keeps turns added while the summary is generated: only the summarized ones are removed', async () => {
+    const cm = new ContextManager({ instructions, recentTurnsToKeep: 2 });
+    addTurns(cm, 4, 'Old');
+    const { llm, release } = gatedSummaryLLM('Old summary.');
+    const done = cm.summarize(llm);
+    cm.addUserTurn('Alice', 'Asked meanwhile');
+    cm.addAgentTurn('Answered meanwhile');
+    release();
+    expect(await done).toBe(true);
+    expect(cm.buildMessages()).toEqual([
+      { role: 'system', content: instructions },
+      { role: 'system', content: 'Conversation summary so far:\nOld summary.' },
+      { role: 'user', content: '[Alice]: Old 2' },
+      { role: 'assistant', content: 'Old 3' },
+      { role: 'user', content: '[Alice]: Asked meanwhile' },
+      { role: 'assistant', content: 'Answered meanwhile' },
+    ]);
+  });
+
+  it('runs one summary at a time', async () => {
+    const cm = new ContextManager({ instructions, recentTurnsToKeep: 1 });
+    addTurns(cm, 4);
+    const { llm, calls, release } = gatedSummaryLLM('Summary.');
+    const first = cm.summarize(llm);
+    expect(await cm.summarize(llm)).toBe(false);
+    release();
+    expect(await first).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(cm.getFullTranscript()).toBe('[assistant]: Turn 3');
+  });
+
+  it('discards a summary that finishes after reset()', async () => {
+    const cm = new ContextManager({ instructions, recentTurnsToKeep: 1 });
+    addTurns(cm, 4);
+    const { llm, release } = gatedSummaryLLM('Stale summary.');
+    const done = cm.summarize(llm);
+    cm.reset();
+    cm.addUserTurn('Alice', 'After reset');
+    release();
+    expect(await done).toBe(false);
+    expect(cm.buildMessages()).toEqual([
+      { role: 'system', content: instructions },
+      { role: 'user', content: '[Alice]: After reset' },
+    ]);
+  });
+
+  it('rejects an empty summary and keeps the turns and the previous summary', async () => {
+    const cm = new ContextManager({ instructions, recentTurnsToKeep: 1 });
+    addTurns(cm, 3);
+    await cm.summarize(new MockLLM('Kept summary.'));
+    addTurns(cm, 2, 'More');
+    const before = cm.buildMessages();
+    await expect(cm.summarize(new MockLLM(''))).rejects.toThrow('Summary was empty');
+    expect(cm.buildMessages()).toEqual(before);
   });
 
   it('getFullTranscript returns formatted transcript', () => {

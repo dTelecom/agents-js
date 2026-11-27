@@ -43,41 +43,6 @@ describe('Pipeline cancellation ownership', () => {
   }
   function question(text: string) { stt.streams[0].simulateTranscription(text, true); }
 
-  it('cancels summarization before starting an obsolete response and preserves context until cleanup', async () => {
-    const summaryGate = gate();
-    let summarySignal: AbortSignal | undefined;
-    let summaries = 0;
-    const answers: string[] = [];
-    create({ async *chat(messages, signal) {
-      if (messages[0].content.startsWith('Summarize')) {
-        if (++summaries === 1) {
-          summarySignal = signal;
-          yield { type: 'token', token: 'INCOMPLETE SUMMARY' };
-          await summaryGate.promise;
-          throw abortError();
-        }
-        yield { type: 'token', token: 'Valid summary.' };
-      } else {
-        answers.push(messages.at(-1)!.content);
-        yield { type: 'token', token: 'The new answer is ready to be spoken.' };
-      }
-      yield { type: 'done' };
-    } }, { maxContextTokens: 1 });
-    const context = pipeline.getContextManager();
-    for (let i = 0; i < 5; i++) context.addUserTurn('user', `Earlier ${i}`);
-    question('Old question'); await flush();
-    const before = context.buildMessages();
-    question('New question'); await flush();
-    expect(summarySignal?.aborted).toBe(true);
-    expect(context.buildMessages()).toEqual(before);
-    expect(answers).toEqual([]);
-    summaryGate.resolve(); await flush();
-    expect(answers).toEqual(['[user]: New question']);
-    expect(context.buildMessages().some(m => m.content.includes('INCOMPLETE SUMMARY'))).toBe(false);
-    expect(tts.synthesizeCalls).toHaveLength(1);
-    expect(errors).toEqual([]);
-  });
-
   for (const kind of ['response', 'greeting'] as const) {
     it(`preserves interruption during ${kind} warmup`, async () => {
       const warmup = gate(); const answers: string[] = [];

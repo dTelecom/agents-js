@@ -2,10 +2,11 @@
  * CloudSpeechSession — a dTelecom Cloud STT or TTS session behind one speech-server socket.
  *
  * Holds are small and grow on demand: STT is prepaid in time chunks and extended before it runs
- * out; TTS in character chunks, extended before a text would pass the limit and before its
- * 30-minute window closes. Every extension yields a new session key, which the owner sends to the
- * open socket as {"type":"extend","session_key":...}. A session key serves one connection: after a
- * disconnect, the owner closes this session and opens a new one.
+ * out; TTS in character chunks, extended in the background once fewer than the threshold remain
+ * (a text waits only when it would pass the hold itself) and before its 30-minute window closes.
+ * Every extension yields a new session key, which the owner sends to the open socket as
+ * {"type":"extend","session_key":...}. A session key serves one connection: after a disconnect,
+ * the owner closes this session and opens a new one.
  */
 
 import type { CloudClient } from '@dtelecom/server-sdk-js';
@@ -28,7 +29,7 @@ export interface CloudSTTSessionOptions {
 export interface CloudTTSSessionOptions {
   /** Characters held per chunk (default 2000). */
   characters?: number;
-  /** Extend when fewer characters than this would remain (default 500). */
+  /** Extend, in the background, when fewer characters than this remain (default 500). */
   extendWhenCharactersLeft?: number;
 }
 
@@ -56,6 +57,8 @@ export class CloudSpeechSession {
   private usedCharacters = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private extending: Promise<void> | null = null;
+  /** After a failed extension, background ones wait until then (a text past the hold does not). */
+  private backgroundRetryAt = 0;
   private closed = false;
 
   private readonly minutes: number;
@@ -91,15 +94,23 @@ export class CloudSpeechSession {
   }
 
   /**
-   * Makes room for `count` more TTS characters before they are sent: extends while the text would
-   * leave fewer than the threshold. Counts the characters as used.
+   * Makes room for `count` more TTS characters before they are sent, and counts them as used.
+   * Waits for an extension only when the text would pass the hold; once fewer than the threshold
+   * remain, extends in the background so the next texts need not wait. A failed background
+   * extension is reported through `onError` and retried after 15 s or when a text needs it.
    */
   async reserveCharacters(count: number): Promise<void> {
-    while (!this.closed && this.usedCharacters + count > this.maxCharacters - this.charactersLeft) {
+    while (!this.closed && this.usedCharacters + count > this.maxCharacters) {
       const needed = this.usedCharacters + count + this.charactersLeft - this.maxCharacters;
       await this.extend(Math.max(this.characters, needed));
     }
     this.usedCharacters += count;
+    if (!this.closed && !this.extending && this.maxCharacters - this.usedCharacters < this.charactersLeft
+      && Date.now() >= this.backgroundRetryAt) {
+      this.extend(this.characters).catch(() => {
+        // extend reported it and delayed the next background try
+      });
+    }
   }
 
   close(): void {
@@ -148,6 +159,7 @@ export class CloudSpeechSession {
       }
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      this.backgroundRetryAt = Date.now() + RETRY_MS;
       log.error(`Cloud ${kind.toUpperCase()} session ${this.sessionId} extension failed:`, error);
       this.config.onError(error);
       throw error;

@@ -25,6 +25,8 @@ export interface STTReady {
   language?: string;
   /** Reported only when requested; absence does not confirm activation. */
   smartTurn?: 'active' | 'acoustic_fallback';
+  /** True when the server accepts `finalize` (see `STTStream.finalize`). */
+  finalize?: boolean;
 }
 
 export interface STTStreamOptions {
@@ -35,6 +37,12 @@ export interface STTStream {
   sendAudio(pcm16: Buffer): void;
   /** Switch language mid-session (only supported by some providers, e.g. DtelecomSTT) */
   setLanguage?(language: string, options?: { forceWhisper?: boolean }): void;
+  /**
+   * Ask the server to end the current utterance now and send its final transcript, instead of
+   * waiting for the end-of-speech silence. Only when the server advertised it (`ready.finalize`);
+   * otherwise a no-op. Returns whether the request was sent. The pipeline does not call it yet.
+   */
+  finalize?(): boolean;
   on(event: 'transcription', cb: (result: TranscriptionResult) => void): this;
   on(event: 'transcription_partial', cb: (result: TranscriptionResult) => void): this;
   on(event: 'partial_end', cb: (result: STTPartialEnd) => void): this;
@@ -124,6 +132,8 @@ export interface LLMChunk {
 export interface LLMChatOptions {
   /** Skip structured output (responseFormat) for this call — return plain text tokens. */
   plainText?: boolean;
+  /** Output token limit for this call instead of the provider's `maxTokens` (used by warmup). */
+  maxTokens?: number;
   /** Tool definitions to pass to the LLM for function calling. */
   tools?: ToolDefinition[];
   /** 'none' asks the model to answer in text without calling a tool (sent as `tool_choice`). */
@@ -186,7 +196,10 @@ export interface AgentConfig {
   onDataMessage?: DataMessageHandler;
   /** Persistent memory across sessions (stores turns, enables semantic search) */
   memory?: MemoryConfig;
-  /** Max context tokens before triggering summarization (default: 5000) */
+  /**
+   * Conversation size (turns plus summary, estimated tokens; instructions not counted) above which
+   * older turns are summarized in the background (default: 5000).
+   */
   maxContextTokens?: number;
   /** Tools for LLM function calling: with a handler the agent runs them, see `Tool`. */
   tools?: Tool[];
@@ -247,7 +260,10 @@ export interface PipelineOptions {
   beforeRespond?: (speaker: string, text: string) => boolean | Promise<boolean>;
   /** Room memory instance (injected by VoiceAgent if memory is enabled) */
   memory?: import('../memory/room-memory').RoomMemory;
-  /** Max context tokens before triggering summarization (default: 5000) */
+  /**
+   * Conversation size (turns plus summary, estimated tokens; instructions not counted) above which
+   * older turns are summarized in the background (default: 5000).
+   */
   maxContextTokens?: number;
   /** Tools for LLM function calling: with a handler the agent runs them, see `Tool`. */
   tools?: Tool[];
@@ -267,7 +283,7 @@ export interface TurnMetrics {
   sttMs: number;
   /** Final transcript received → turn started (waiting for a previous turn). */
   queueMs: number;
-  /** Turn started → LLM request (warmup, summary, memory search). */
+  /** Turn started → LLM request (warmup, memory search). */
   prepareMs: number;
   /** LLM request → first token. */
   ttftMs: number | null;

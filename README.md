@@ -18,9 +18,11 @@ The pipeline uses a producer/consumer pattern: LLM tokens are split into sentenc
 
 After completed speech, the pipeline retains an 800 ms estimate for audio to reach the listener before changing its UI state to idle. This wait is cancellable: a new user turn releases it immediately, and an interrupted response or greeting does not add the wait after provider cleanup. Responses with no speech audio skip it entirely. Cancellation still flushes local buffered audio and waits for the active producer/consumer to finish before starting the queued turn; TTS synthesis remains sequential for providers that require it.
 
-Cancellation covers warmup, conversation summarization, memory lookup and response generation. Cancelled summaries do not replace conversation history. A final transcript arriving during a response occupies a single pending-turn slot (the latest final replaces any earlier pending final) and interrupts the current cycle. The next cycle starts after the active provider tasks finish cancellation cleanup. An `APIUserAbortError` from an aborted cycle is expected cancellation; genuine provider failures remain errors.
+Cancellation covers warmup, memory lookup and response generation. A final transcript arriving during a response occupies a single pending-turn slot (the latest final replaces any earlier pending final) and interrupts the current cycle. The next cycle starts after the active provider tasks finish cancellation cleanup. An `APIUserAbortError` from an aborted cycle is expected cancellation; genuine provider failures remain errors.
 
-Latency logs separate `Queue` (final transcript received to response-cycle start), `Prepare` (warmup, summary and memory lookup), `LLM` (request to first sentence, including `TTFT`) and `TTS` (first sentence to first audio). `STT` is server-reported processing time. `Overall` includes those phases but excludes STT endpointing wait; it is unavailable for turns without a text response. These measurements are not microphone-to-speaker latency.
+When the conversation (its turns plus the current summary, not the instructions) passes `maxContextTokens`, older turns are summarized in the background after a reply, keeping the four most recent verbatim. No answer waits for a summary: answers use the full conversation until the summary is ready. The new summary covers the previous one and replaces it; turns spoken while it is written are kept. One summary runs at a time. A failed summary is logged and the conversation stays as it is; `stop()` cancels a running summary and a context reset discards it.
+
+Latency logs separate `Queue` (final transcript received to response-cycle start), `Prepare` (warmup and memory lookup), `LLM` (request to first sentence, including `TTFT`) and `TTS` (first sentence to first audio). `STT` is server-reported processing time. `Overall` includes those phases but excludes STT endpointing wait; it is unavailable for turns without a text response. These measurements are not microphone-to-speaker latency.
 
 For dTelecom TTS, cancellation sends `clear` and waits for `cleared` before reusing the WebSocket. Late audio from the cancelled request is discarded. A missing acknowledgement closes the connection after five seconds so a subsequent request reconnects; this is an error timeout, not a delay applied to successful cancellations.
 
@@ -88,7 +90,7 @@ Run `node --env-file=.env agent.mjs`. Join `voice-demo` from a browser in the sa
 How the sessions work:
 
 - **STT**: one session per participant stream, billed per connected minute. Each holds 10 minutes of balance and is extended by 10 minutes when under 2 remain. Change it with `cloudSession: { minutes, extendWhenMinutesLeft }`.
-- **TTS**: one session for the agent's voice, billed per character. It holds 2,000 characters and is extended before a sentence would leave fewer than 500, and before its 30-minute window closes. Change it with `cloudSession: { characters, extendWhenCharactersLeft }`.
+- **TTS**: one session for the agent's voice, billed per character. It holds 2,000 characters and is extended in the background once fewer than 500 remain, so sentences do not wait for it; only a sentence that would pass the hold waits for the extension. It is also extended before its 30-minute window closes. Change it with `cloudSession: { characters, extendWhenCharactersLeft }`.
 - Unused holds are released when a session ends. An extension sends the new key to the open socket. A session key serves one connection: after a disconnect the provider opens a new session. A session the cloud refuses (for example `insufficient_balance`) surfaces as an `error` event.
 - `ttl` sets how long the agent's room token holds (default 6 hours, at most 24). The agent extends it by the same amount before it expires, so it stays until `stop()`; the cloud removes a participant a minute after an unextended token expires. A failed extension surfaces as an `error` event.
 
@@ -214,7 +216,9 @@ With this provider in `VoiceAgent`, subscribe to:
 - `transcription_partial`: `{ text, isFinal: false, utteranceId, revision, windowStartSeconds, provisional: true, replacePrevious: true, speaker }`. Replace the displayed provisional window; do not append it to committed text.
 - `partial_end`: `{ utteranceId, reason, speaker }`. Clear provisional text on `finalizing`, `discarded`, `replaced` or `reconfigured`.
 - `transcription`: partials also appear here with `isFinal: false`; finals carry the same `utteranceId` and supersede them. Only finals start an LLM turn. Nonempty partials can trigger barge-in while the agent is speaking.
-- `stt_ready`: `{ clientId?, language?, smartTurn?, speaker }`. `smartTurn: "active"` confirms the semantic hook; `"acoustic_fallback"` reports silence detection. An absent field does not confirm activation. Missing server-model errors surface through `error`.
+- `stt_ready`: `{ clientId?, language?, smartTurn?, finalize?, speaker }`. `smartTurn: "active"` confirms the semantic hook; `"acoustic_fallback"` reports silence detection. An absent field does not confirm activation. Missing server-model errors surface through `error`. `finalize: true` means the server accepts `finalize` (below).
+
+`stream.finalize()` asks the server to end the current utterance now and send its final transcript, instead of waiting for the end-of-speech silence; call it when your application knows the speaker has finished. It is sent only when the connected server advertised `finalize: true` in its ready message; otherwise, and before the stream is ready, it does nothing and returns `false`. Support is reset on every reconnect. The agent's own pipeline does not call it yet.
 
 Raw `STTStream` exposes the same events without `speaker`, with `ready` instead of `stt_ready`. Providers other than dTelecom may not emit these optional event types. For transcript display, subscribe to either `transcription_partial` or nonfinal `transcription`, not both.
 
@@ -233,6 +237,7 @@ Smart Turn defaults to off. Current server defaults are completion threshold 0.5
 | `nameVariants` | `string[]` | `[]` | Additional names to respond to |
 | `onDataMessage` | `DataMessageHandler` | `undefined` | Callback for data channel messages |
 | `tools` | `Tool[]` | `undefined` | Tools the model can call; see [Tools](#tools) |
+| `maxContextTokens` | `number` | `5000` | Conversation size (turns plus summary, estimated at 4 characters per token; instructions not counted) above which older turns are summarized in the background |
 
 ## Events
 
@@ -241,7 +246,7 @@ Smart Turn defaults to off. Current server defaults are completion threshold 0.5
 | `transcription` | `{ text, isFinal, speaker, utteranceId? }` | Final or provisional STT result |
 | `transcription_partial` | `{ text, utteranceId, revision, windowStartSeconds, speaker }` | Replace temporary display text |
 | `partial_end` | `{ utteranceId, reason, speaker }` | Clear temporary display text |
-| `stt_ready` | `{ clientId?, language?, smartTurn?, speaker }` | Check active/fallback endpointing |
+| `stt_ready` | `{ clientId?, language?, smartTurn?, finalize?, speaker }` | Check active/fallback endpointing and `finalize` support |
 | `sentence` | `string` | A sentence finished playing |
 | `response` | `string` | Full agent response text |
 | `agentState` | `'idle' \| 'listening' \| 'thinking' \| 'speaking'` | Agent state changed |

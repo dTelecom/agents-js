@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0 — 2026-11-27
+
+- Conversation summaries no longer delay answers. A summary starts in the background after a reply and never holds up a turn: answers use the full conversation until it is ready. Before, once the conversation passed `maxContextTokens` every turn waited for a summary request before its answer request started.
+- `maxContextTokens` counts the conversation (its turns plus the current summary), not the instructions. Before, instructions longer than the budget (5,000 estimated tokens by default) made every turn from the third one on summarize.
+- A new summary covers the previous one and replaces it, instead of being appended to it. Turns added while a summary is written are kept, and every turn not yet summarized is sent to the model; before, only the four most recent turns were sent once a summary existed. Summaries are requested as plain text, so providers with structured output (`responseFormat`) summarize too.
+- One summary runs at a time, with its own cancellation: `stop()` cancels it, `ContextManager.reset()` discards its result. A failed or empty summary (including a provider error such as a truncated reply) is logged as a warning and leaves the conversation as it was; it is no longer reported as a turn error. `ContextManager.summarize()` now resolves `true` when it committed a summary. `prepareMs` / `Prepare` no longer include summarization.
+- `OpenRouterLLM` and `OpenAILLM` warmup asks for at most 16 output tokens instead of a full reply: it only primes the connection and the provider's prompt cache. `LLMChatOptions.maxTokens` sets a per-request output limit.
+- dTelecom Cloud TTS: the character hold is extended in the background once fewer than `extendWhenCharactersLeft` characters remain, so a sentence no longer waits for the extension request. Only a sentence that would pass the hold itself waits; if that extension fails, the sentence fails as before. A failed background extension is logged and retried after 15 s or when a sentence needs it.
+- `DtelecomSTT` streams have `finalize()`: it asks the server to end the current utterance now and send its final transcript. It is sent only when the server's ready message advertises `finalize: true` (reported as `ready.finalize` / `stt_ready.finalize`); with other servers it does nothing and returns `false`. The pipeline does not call it yet. `STTStream.finalize` is an optional method of the interface.
+
 ## 0.10.0 — 2026-11-26
 
 - Voice agents can connect to the next node when the primary is unavailable. Cloud supplies the ranked signaling URLs. For a pre-signed token, pass the issuer's `fallbackUrls` alongside `wsUrl`.

@@ -11,6 +11,11 @@ import { createLogger } from '../utils/logger';
 const log = createLogger('OpenRouterLLM');
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+/**
+ * Output limit of the warmup request: it only primes the connection and the provider's prompt
+ * cache, so the reply itself is not needed. 16 is the lowest limit OpenAI's newer endpoints accept.
+ */
+const WARMUP_MAX_TOKENS = 16;
 
 export interface OpenRouterLLMOptions {
   apiKey: string;
@@ -85,7 +90,7 @@ export class OpenRouterLLM implements LLMPlugin {
     ];
 
     try {
-      const gen = this.chat(messages);
+      const gen = this.chat(messages, undefined, { maxTokens: WARMUP_MAX_TOKENS });
       for await (const chunk of gen) {
         if (chunk.type === 'done') break;
       }
@@ -99,7 +104,7 @@ export class OpenRouterLLM implements LLMPlugin {
     const body: Record<string, unknown> = {
       model: this.model,
       messages,
-      max_tokens: this.maxTokens,
+      max_tokens: options?.maxTokens ?? this.maxTokens,
       ...(this.temperature === null ? {} : { temperature: this.temperature }),
       ...(this.reasoningEffort === undefined ? {} : { reasoning_effort: this.reasoningEffort }),
       stream: true,

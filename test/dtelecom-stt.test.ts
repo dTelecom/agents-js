@@ -208,3 +208,52 @@ it('keeps at most 5 s of audio while connecting, dropping the oldest', async () 
   await vi.waitFor(() => expect(f.messages.filter(Buffer.isBuffer)).toHaveLength(5));
   expect(f.messages.filter(Buffer.isBuffer).map((b: Buffer) => b[0])).toEqual([5, 6, 7, 8, 9]);
 });
+
+describe('finalize', () => {
+  it('is a no-op on a server that does not advertise it, and before ready', async () => {
+    const f = await fixture();
+    const stream = f.stream();
+    const ready = vi.fn();
+    stream.on('ready', ready);
+    await vi.waitFor(() => expect(f.messages).toHaveLength(1));
+    expect(stream.finalize!()).toBe(false); // not ready yet
+    f.send({ type: 'ready', language: 'en', client_id: 'test' });
+    await vi.waitFor(() => expect(ready).toHaveBeenCalledOnce());
+    expect(ready.mock.calls[0][0]).toEqual({ clientId: 'test', language: 'en' });
+    expect(stream.finalize!()).toBe(false);
+    stream.sendAudio(Buffer.from([1, 0]));
+    await vi.waitFor(() => expect(f.messages).toHaveLength(2));
+    expect(f.messages.filter((m) => !Buffer.isBuffer(m) && m.type === 'finalize')).toEqual([]);
+  });
+
+  it('sends {"type":"finalize"} when the ready message advertises finalize: true', async () => {
+    const f = await fixture();
+    const stream = f.stream();
+    const ready = vi.fn();
+    stream.on('ready', ready);
+    await vi.waitFor(() => expect(f.messages).toHaveLength(1));
+    f.send({ type: 'ready', language: 'en', client_id: 'test', finalize: true });
+    await vi.waitFor(() => expect(ready).toHaveBeenCalledOnce());
+    expect(ready.mock.calls[0][0]).toEqual({ clientId: 'test', language: 'en', finalize: true });
+    expect(stream.finalize!()).toBe(true);
+    await vi.waitFor(() => expect(f.messages).toEqual([expect.objectContaining({ type: 'config' }), { type: 'finalize' }]));
+    // The server's reply is not a transcript; the final arrives as usual.
+    f.send({ type: 'finalize_result', status: 'ok' });
+    await stream.close();
+    expect(stream.finalize!()).toBe(false);
+  });
+
+  it('forgets server support after a reconnect until the new ready says so', async () => {
+    const f = await fixture({ getSessionKey: async () => ({ sessionKey: 'test-only-2' }) });
+    const stream = f.stream();
+    await vi.waitFor(() => expect(f.messages).toHaveLength(1));
+    f.send({ type: 'ready', language: 'en', finalize: true });
+    await vi.waitFor(() => expect(stream.finalize!()).toBe(true));
+    f.sockets[0].close();
+    await vi.waitFor(() => expect(f.sockets).toHaveLength(2), { timeout: 2000 });
+    expect(stream.finalize!()).toBe(false);
+    f.send({ type: 'ready', language: 'en' }); // an older server
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(stream.finalize!()).toBe(false);
+  });
+});

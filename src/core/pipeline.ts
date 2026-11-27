@@ -145,6 +145,11 @@ export class Pipeline extends EventEmitter {
   private _agentState: AgentState = 'idle';
   /** Queued turn while current one is still processing */
   private pendingTurn: PendingTurn | null = null;
+  /**
+   * The background summary in flight, if any. It has its own controller: a turn's signal is
+   * aborted when the turn ends, while the summary outlives it.
+   */
+  private summaryAbort: AbortController | null = null;
 
   constructor(options: PipelineOptions) {
     super();
@@ -259,6 +264,8 @@ export class Pipeline extends EventEmitter {
     this._running = false;
     this._stopped = true;
     this.pendingTurn = null;
+    this.summaryAbort?.abort();
+    this.summaryAbort = null;
     this.turnDetector.reset();
     this.bargeIn.reset();
     this.audioOutput.flush();
@@ -372,11 +379,6 @@ export class Pipeline extends EventEmitter {
       await waitWithSignal(this._warmupPromise, signal);
       signal.throwIfAborted();
       this.context.addUserTurn(speaker, text);
-
-      if (this.context.shouldSummarize()) {
-        await this.context.summarize(this.llm, signal);
-      }
-      signal.throwIfAborted();
 
       // Search memory for relevant past context
       let memoryContext = '';
@@ -667,7 +669,7 @@ export class Pipeline extends EventEmitter {
 
       // ── Latency summary ──
       // STT: server-reported processing time; excludes endpointing wait.
-      // Queue: final received → cycle acquired. Prepare: warmup/summary/memory.
+      // Queue: final received → cycle acquired. Prepare: warmup/memory (summaries run in the background).
       // LLM: request start → first complete sentence (TTFT + accumulation).
       // TTS:  first sentence ready → first audio chunk to WebRTC
       // Overall includes queue/preparation, but still excludes endpointing wait.
@@ -702,6 +704,7 @@ export class Pipeline extends EventEmitter {
       this.emit('metrics', metrics);
 
       if (finalText.trim()) this.context.addAgentTurn(finalText.trim());
+      this.summarizeInBackground();
       if (fullResponse.trim()) {
         this.memory?.storeTurn('assistant', fullResponse.trim(), true);
         this.emit('response', this.cleanText(fullResponse.trim()));
@@ -767,6 +770,7 @@ export class Pipeline extends EventEmitter {
       if (!signal.aborted) {
         await this.audioOutput.writeSilence(40);
         this.context.addAgentTurn(text);
+        this.summarizeInBackground();
         this.memory?.storeTurn('assistant', text, true);
         this.emit('response', this.cleanText(text));
       }
@@ -793,6 +797,24 @@ export class Pipeline extends EventEmitter {
         this.processTurn(nextTurn);
       }
     }
+  }
+
+  /**
+   * Summarizes older turns in the background once the conversation is over its budget. A turn
+   * never waits for it: answers use the context as it is until the summary is committed. At most
+   * one runs; stop() cancels it. A failure is logged and the turns stay as they are.
+   */
+  private summarizeInBackground(): void {
+    if (this._stopped || this.summaryAbort || !this.context.shouldSummarize()) return;
+    const controller = new AbortController();
+    this.summaryAbort = controller;
+    this.context.summarize(this.llm, controller.signal)
+      .catch((err: unknown) => {
+        if (!isCancellation(err, controller.signal)) log.warn('Conversation summary failed (turns kept as they are):', err);
+      })
+      .finally(() => {
+        if (this.summaryAbort === controller) this.summaryAbort = null;
+      });
   }
 
   private async synthesizeAndPlay(
