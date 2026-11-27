@@ -209,7 +209,7 @@ const stt = new DtelecomSTT({
 });
 ```
 
-Both options are omitted by default, preserving existing final-only behavior. `partials` requests replaceable recognition windows. The provider sends `smartTurn` as `smart_turn`; it requires a configured server model and supported ANE VAD language route. These choices survive language changes and reconnects.
+Both options are omitted by default, preserving existing final-only behavior. `partials` requests replaceable recognition windows. The provider sends `smartTurn` as `smart_turn`; it requires a supported language and a server offering the feature. These choices survive language changes and reconnects.
 
 With this provider in `VoiceAgent`, subscribe to:
 
@@ -222,7 +222,7 @@ With this provider in `VoiceAgent`, subscribe to:
 
 Raw `STTStream` exposes the same events without `speaker`, with `ready` instead of `stt_ready`. Providers other than dTelecom may not emit these optional event types. For transcript display, subscribe to either `transcription_partial` or nonfinal `transcription`, not both.
 
-Smart Turn defaults to off. Current server defaults are completion threshold 0.5, minimum pause 500 ms, maximum 2 seconds of received silence and classifier deadline 250 ms. These are not end-to-end latency guarantees. Use server-sdk-node 0.2.6 or later to supply silence during Opus DTX/input stalls. See [Smart Turn integration notes](SMART_TURN.md) for current behavior and separately dated historical acceptance results.
+Use server-sdk-node 0.2.6 or later to supply silence during Opus DTX or input stalls. See the [Smart Turn integration guide](SMART_TURN.md) to check activation or acoustic fallback for a stream.
 
 ## Configuration
 
@@ -398,11 +398,7 @@ requires `watermark: "active"`
 before yielding PCM. It logs `TTS watermark=active (AudioSeal B)`. Unsupported
 servers or failed activation produce an error, never silent unmarked output.
 
-The accepted B configuration runs on 48 kHz float audio after TTS resampling
-and SSML gain, before PCM16/Opus. It adds an 80 ms input buffer and approximately
-5 ms inference in the M6 lab; live timing depends on load and audio arrival.
-No filter or resampling is applied after watermarking. Short/interrupted speech
-may not remain detectable. This option is off by default even on capable servers.
+Watermarking buffers audio before playback. Short or interrupted speech may be difficult to detect.
 
 ## CI and live verification
 

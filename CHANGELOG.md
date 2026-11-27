@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.1 — 2026-11-27
+
+- Updated Smart Turn and watermark documentation for application developers.
+
 ## 0.11.0 — 2026-11-27
 
 - Conversation summaries no longer delay answers. A summary starts in the background after a reply and never holds up a turn: answers use the full conversation until it is ready. Before, once the conversation passed `maxContextTokens` every turn waited for a summary request before its answer request started.

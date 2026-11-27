@@ -74,7 +74,7 @@ Entry points: `src/index.ts` (core), `src/providers/index.ts`, `src/memory/index
 
 ## Related Projects
 
-- **ai-tutor-demo**: `/Users/vf/docs/ai-tutor-demo/` — separate git repo, uses this SDK
+- [AI Tutor Demo](https://github.com/dTelecom/ai-tutor-demo) uses this SDK for real-time language lessons.
 - Uses `--legacy-peer-deps` due to sqlite-vec alpha version conflict
 
 ## Build & Test
