@@ -148,6 +148,7 @@ export class VoiceAgent extends EventEmitter {
     this.pipeline.on('sentence', (text, raw) => this.emit('sentence', text, raw));
     this.pipeline.on('response', (text) => this.emit('response', text));
     this.pipeline.on('agentState', (state) => this.emit('agentState', state));
+    this.pipeline.on('interrupted', () => this.emit('interrupted'));
     this.pipeline.on('toolCall', (tc) => this.emit('toolCall', tc));
     this.pipeline.on('metrics', (metrics) => this.emit('metrics', metrics));
     this.pipeline.on('error', (error) => this.emit('error', error));

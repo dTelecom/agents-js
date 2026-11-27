@@ -250,6 +250,7 @@ Use server-sdk-node 0.2.6 or later to supply silence during Opus DTX or input st
 | `sentence` | `string` | A sentence finished playing |
 | `response` | `string` | Full agent response text |
 | `agentState` | `'idle' \| 'listening' \| 'thinking' \| 'speaking'` | Agent state changed |
+| `interrupted` | — | A participant cut off the agent while its reply or `say()` was playing (barge-in). Emitted once, before the state returns to `idle`; not emitted when a new question arrives while the agent is still thinking |
 | `toolCall` | `ToolCallResult` | The LLM invoked a tool (before its handler runs) |
 | `metrics` | `TurnMetrics` | Per-turn latency after a completed reply; see [Latency metrics](#latency-metrics) |
 | `error` | `Error` | Pipeline, speech session or token extension error |

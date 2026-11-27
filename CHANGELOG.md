@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.0 — 2026-11-27
+
+- New `interrupted` event on `VoiceAgent`: a participant cut off the agent while its reply or `say()` was playing (barge-in by speech or by a new question). Emitted once per cut-off reply, before `agentState` returns to `idle`. A new question while the agent is still thinking is not reported. Use it to mark the agent's last transcript line as interrupted on a page.
+
 ## 0.11.1 — 2026-11-27
 
 - Updated Smart Turn and watermark documentation for application developers.

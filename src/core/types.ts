@@ -310,6 +310,8 @@ export interface AgentEvents {
   response: (text: string) => void;
   /** Agent state: idle → listening (STT active) → thinking (LLM) → speaking (audio) → idle. */
   agentState: (state: AgentState) => void;
+  /** A participant cut off the agent while it was speaking (barge-in); emitted before the state returns to idle. */
+  interrupted: () => void;
   /** Emitted when the LLM invokes a tool, before a handler runs. */
   toolCall: (toolCall: ToolCallResult) => void;
   /** Per-turn latency after each completed reply. */
@@ -327,6 +329,7 @@ export interface PipelineEvents {
   sentence: (text: string) => void;
   response: (text: string) => void;
   agentState: (state: AgentState) => void;
+  interrupted: () => void;
   /** Emitted when the LLM invokes a tool, before a handler runs. */
   toolCall: (toolCall: ToolCallResult) => void;
   metrics: (metrics: TurnMetrics) => void;

@@ -143,6 +143,8 @@ export class Pipeline extends EventEmitter {
   private _running = false;
   private _stopped = false;
   private _agentState: AgentState = 'idle';
+  /** The current reply or greeting has played audio: a barge-in now cuts it off. Reset per cycle. */
+  private replyPlayed = false;
   /** Queued turn while current one is still processing */
   private pendingTurn: PendingTurn | null = null;
   /**
@@ -176,8 +178,13 @@ export class Pipeline extends EventEmitter {
     this.turnDetector.onTurnEnd = () => {};
 
     this.bargeIn.onInterrupt = () => {
+      // Only a reply that had started playing was cut off; a new turn while thinking is not an interruption.
+      // (A partial transcript sets 'listening' just before the trigger, so the state alone cannot tell.)
+      const cutOff = this.replyPlayed;
+      this.replyPlayed = false;
       this.audioOutput.flush();
       this.splitter.reset();
+      if (cutOff) this.emit('interrupted');
       this.setAgentState('idle');
     };
 
@@ -210,6 +217,7 @@ export class Pipeline extends EventEmitter {
   }
 
   private setAgentState(state: AgentState): void {
+    if (state === 'speaking') this.replyPlayed = true;
     if (this._agentState !== state) {
       this._agentState = state;
       this.emit('agentState', state);
@@ -362,6 +370,7 @@ export class Pipeline extends EventEmitter {
 
     this._processing = true;
     const signal = this.bargeIn.startCycle();
+    this.replyPlayed = false;
     let taskFailure: { error: unknown } | undefined;
 
     // ── Latency tracking ──
@@ -750,6 +759,7 @@ export class Pipeline extends EventEmitter {
 
     this._processing = true;
     const signal = this.bargeIn.startCycle();
+    this.replyPlayed = false;
     let responseStarted = false;
 
     try {
